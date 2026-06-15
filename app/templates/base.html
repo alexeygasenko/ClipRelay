@@ -7,20 +7,6 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body class="{% block body_class %}{% endblock %}">
-  <svg class="liquid-glass-filters" aria-hidden="true">
-    <defs>
-      <filter id="liquid-glass-refraction" x="-12%" y="-18%" width="124%" height="136%" color-interpolation-filters="sRGB">
-        <feTurbulence type="fractalNoise" baseFrequency="0.009 0.018" numOctaves="2" seed="8" result="noise"/>
-        <feGaussianBlur in="noise" stdDeviation="2.2" result="softNoise"/>
-        <feDisplacementMap in="SourceGraphic" in2="softNoise" scale="18" xChannelSelector="R" yChannelSelector="G"/>
-      </filter>
-      <filter id="liquid-glass-control" x="-16%" y="-35%" width="132%" height="170%" color-interpolation-filters="sRGB">
-        <feTurbulence type="fractalNoise" baseFrequency="0.012 0.026" numOctaves="2" seed="12" result="noise"/>
-        <feGaussianBlur in="noise" stdDeviation="1.6" result="softNoise"/>
-        <feDisplacementMap in="SourceGraphic" in2="softNoise" scale="12" xChannelSelector="R" yChannelSelector="G"/>
-      </filter>
-    </defs>
-  </svg>
   <div class="ambient ambient-one"></div>
   <div class="ambient ambient-two"></div>
   <div class="ambient ambient-three"></div>
