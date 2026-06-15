@@ -256,9 +256,11 @@ class TikTokToTelegram:
         chat_id = chat_id.strip()
         bot_token = bot_token.strip()
         if not name or not chat_id or not bot_token:
-            raise ValueError("Укажите название, @тег канала и токен бота")
-        if not chat_id.startswith("@"):
-            raise ValueError("Тег Telegram-канала должен начинаться с @")
+            raise ValueError("Укажите название, ID канала и токен бота")
+        if not chat_id.startswith("@") and not re.fullmatch(r"-100\d+", chat_id):
+            raise ValueError(
+                "Укажите публичный @тег или числовой ID приватного канала вида -100..."
+            )
         try:
             response = requests.get(
                 f"https://api.telegram.org/bot{bot_token}/getChat",
@@ -273,7 +275,7 @@ class TikTokToTelegram:
             raise ValueError("Telegram не ответил корректно на проверку бота") from error
         if not payload.get("ok"):
             raise ValueError(
-                "Telegram не подтвердил доступ. Проверьте токен, @тег и права бота."
+                "Telegram не подтвердил доступ. Проверьте токен, ID канала и права бота."
             )
         self.storage.add_telegram_destination(name, chat_id, bot_token)
 

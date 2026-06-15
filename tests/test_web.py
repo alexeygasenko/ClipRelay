@@ -177,6 +177,7 @@ def test_home_has_post_builder_transition(tmp_path: Path) -> None:
     assert 'data-channel-picker' in response.text
     assert "Добавить Telegram-канал" in response.text
     assert "Обновить cookies" in response.text
+    assert "@channel или -1001234567890" in response.text
 
 
 def test_settings_can_add_telegram_channel_and_update_cookies(tmp_path: Path) -> None:

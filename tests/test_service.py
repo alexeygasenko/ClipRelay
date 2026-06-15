@@ -237,3 +237,40 @@ def test_service_updates_uploaded_cookies_without_restart(tmp_path) -> None:
     assert path == tmp_path / "youtube-cookies.txt"
     assert service.youtube_cookies_file == path
     assert path.read_bytes() == b"# Netscape HTTP Cookie File\n"
+
+
+def test_service_accepts_private_telegram_channel_id(tmp_path, monkeypatch) -> None:
+    config = Config(
+        telegram_bot_token="token",
+        telegram_chat_id="@main",
+        tiktok_channels=(),
+        poll_interval_seconds=300,
+        scan_limit=15,
+        post_existing=False,
+        data_dir=tmp_path,
+        cookies_file=None,
+        youtube_cookies_file=None,
+        youtube_po_token_provider_url=None,
+        web_host="127.0.0.1",
+        web_port=8080,
+        web_username=None,
+        web_password=None,
+    )
+
+    class Response:
+        def json(self):
+            return {"ok": True}
+
+    captured = {}
+
+    def fake_get(url, params, timeout):
+        captured.update(url=url, params=params, timeout=timeout)
+        return Response()
+
+    monkeypatch.setattr("app.service.requests.get", fake_get)
+    service = TikTokToTelegram(config)
+
+    service.add_telegram_destination("Private", "-1001234567890", "private-token")
+
+    assert captured["params"]["chat_id"] == "-1001234567890"
+    assert service.storage.telegram_destination("-1001234567890").name == "Private"
