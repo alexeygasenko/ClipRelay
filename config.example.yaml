@@ -18,6 +18,10 @@ tiktok:
   # Экспортированный cookies.txt в Netscape-формате, если TikTok требует авторизацию.
   # cookies_file: tiktok-cookies.txt
 
+instagram:
+  # Экспортированный cookies.txt в Netscape-формате, если Instagram требует вход.
+  # cookies_file: instagram-cookies.txt
+
 youtube:
   # Экспортированный cookies.txt для YouTube, если сервис требует подтверждение входа.
   # cookies_file: youtube-cookies.txt

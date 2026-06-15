@@ -11,6 +11,7 @@ services:
       - ./data:/config/data
       - ./config.yaml:/config/config.yaml:ro
       - ./tiktok-cookies.txt:/config/tiktok-cookies.txt:ro
+      - ./instagram-cookies.txt:/config/instagram-cookies.txt:ro
       - ./youtube-cookies.txt:/config/youtube-cookies.txt:ro
 
   bgutil-provider:

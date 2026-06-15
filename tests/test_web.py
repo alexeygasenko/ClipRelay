@@ -91,6 +91,7 @@ def make_config(tmp_path: Path) -> Config:
         post_existing=False,
         data_dir=tmp_path,
         cookies_file=None,
+        instagram_cookies_file=None,
         youtube_cookies_file=None,
         youtube_po_token_provider_url=None,
         web_host="127.0.0.1",

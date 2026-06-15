@@ -1,4 +1,4 @@
-# TikTok to Telegram
+# ClipRelay
 
 Docker-сервис:
 
@@ -53,6 +53,7 @@ docker compose logs -f
 - автоматически найти и добавить каналы по токену бота после назначения его
   администратором и публикации нового поста;
 - заменить TikTok cookies;
+- заменить Instagram cookies;
 - заменить YouTube cookies.
 
 Публичные Telegram-каналы сохраняются и показываются по `@тегу`. Для приватных
@@ -93,6 +94,20 @@ tiktok:
 ```
 
 Логин и пароль TikTok сервису передавать не нужно.
+
+## Instagram cookies
+
+Instagram часто ограничивает скачивание без авторизации. Если видите ошибку
+`Requested content is not available, rate-limit reached or login required`,
+экспортируйте Instagram cookies браузера в Netscape-формате и укажите:
+
+```yaml
+instagram:
+  cookies_file: instagram-cookies.txt
+```
+
+Файл также можно обновить через настройки веб-интерфейса без ручного
+перезапуска сервиса.
 
 ## YouTube cookies
 

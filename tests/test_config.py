@@ -50,6 +50,8 @@ telegram:
   chat_id: "@channel"
 tiktok:
   cookies_file: tiktok-cookies.txt
+instagram:
+  cookies_file: instagram-cookies.txt
 youtube:
   cookies_file: youtube-cookies.txt
 """,
@@ -60,6 +62,7 @@ youtube:
     config = Config.from_sources()
 
     assert config.cookies_file == tmp_path / "tiktok-cookies.txt"
+    assert config.instagram_cookies_file == tmp_path / "instagram-cookies.txt"
     assert config.youtube_cookies_file == tmp_path / "youtube-cookies.txt"
 
 

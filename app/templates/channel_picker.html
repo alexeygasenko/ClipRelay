@@ -10,7 +10,7 @@
   <button id="{{ id }}" class="channel-picker-trigger" type="button" data-channel-trigger aria-label="Выбрать Telegram-канал">
     <span class="channel-picker-value">
       <span data-channel-label>{{ selected.channel.name }}</span>
-      <small data-channel-tag>{% if not selected.channel.chat_id.startswith("-100") %}{{ selected.channel.chat_id }}{% endif %}</small>
+      <small data-channel-tag>{% if not selected.channel.chat_id.startswith("-") %}{{ selected.channel.chat_id }}{% endif %}</small>
     </span>
     <span class="channel-picker-chevron" aria-hidden="true"></span>
   </button>
@@ -22,11 +22,11 @@
       type="button"
       data-channel-value="{{ channel.chat_id }}"
       data-channel-label="{{ channel.name }}"
-      data-channel-display="{% if not channel.chat_id.startswith('-100') %}{{ channel.chat_id }}{% endif %}"
+      data-channel-display="{% if not channel.chat_id.startswith('-') %}{{ channel.chat_id }}{% endif %}"
       data-channel-search-value="{{ channel.name }} {{ channel.chat_id }}"
     >
       <span>{{ channel.name }}</span>
-      <small>{% if not channel.chat_id.startswith("-100") %}{{ channel.chat_id }}{% endif %}</small>
+      <small>{% if not channel.chat_id.startswith("-") %}{{ channel.chat_id }}{% endif %}</small>
     </button>
     {% endfor %}
   </div>

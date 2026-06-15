@@ -76,6 +76,7 @@ class Config:
     post_existing: bool
     data_dir: Path
     cookies_file: Path | None
+    instagram_cookies_file: Path | None
     youtube_cookies_file: Path | None
     youtube_po_token_provider_url: str | None
     web_host: str
@@ -119,6 +120,9 @@ class Config:
         youtube_cookies = str(
             _value(data, "YOUTUBE_COOKIES_FILE", "youtube.cookies_file", "")
         ).strip()
+        instagram_cookies = str(
+            _value(data, "INSTAGRAM_COOKIES_FILE", "instagram.cookies_file", "")
+        ).strip()
         youtube_po_token_provider_url = str(
             _value(
                 data,
@@ -148,6 +152,7 @@ class Config:
             )
             or config_file.parent / "data",
             cookies_file=_config_path(cookies, config_file),
+            instagram_cookies_file=_config_path(instagram_cookies, config_file),
             youtube_cookies_file=_config_path(youtube_cookies, config_file),
             youtube_po_token_provider_url=youtube_po_token_provider_url or None,
             web_host=str(_value(data, "WEB_HOST", "web.host", "0.0.0.0")),

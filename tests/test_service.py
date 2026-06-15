@@ -162,6 +162,7 @@ def test_service_copies_cookies_to_writable_data_dir(tmp_path) -> None:
         post_existing=False,
         data_dir=data_dir,
         cookies_file=source,
+        instagram_cookies_file=source,
         youtube_cookies_file=source,
         youtube_po_token_provider_url=None,
         web_host="127.0.0.1",
@@ -173,6 +174,7 @@ def test_service_copies_cookies_to_writable_data_dir(tmp_path) -> None:
     service = TikTokToTelegram(config)
 
     assert service.tiktok_cookies_file == data_dir / "tiktok-cookies.txt"
+    assert service.instagram_cookies_file == data_dir / "instagram-cookies.txt"
     assert service.youtube_cookies_file == data_dir / "youtube-cookies.txt"
 
 
@@ -195,6 +197,7 @@ def test_publish_youtube_sends_photo_to_selected_channel(tmp_path, monkeypatch) 
         post_existing=False,
         data_dir=tmp_path,
         cookies_file=None,
+        instagram_cookies_file=None,
         youtube_cookies_file=None,
         youtube_po_token_provider_url=None,
         web_host="127.0.0.1",
@@ -250,6 +253,7 @@ def test_service_updates_uploaded_cookies_without_restart(tmp_path) -> None:
         post_existing=False,
         data_dir=tmp_path,
         cookies_file=None,
+        instagram_cookies_file=None,
         youtube_cookies_file=None,
         youtube_po_token_provider_url=None,
         web_host="127.0.0.1",
@@ -259,10 +263,10 @@ def test_service_updates_uploaded_cookies_without_restart(tmp_path) -> None:
     )
     service = TikTokToTelegram(config)
 
-    path = service.update_cookies("youtube", b"# Netscape HTTP Cookie File\n")
+    path = service.update_cookies("instagram", b"# Netscape HTTP Cookie File\n")
 
-    assert path == tmp_path / "youtube-cookies.txt"
-    assert service.youtube_cookies_file == path
+    assert path == tmp_path / "instagram-cookies.txt"
+    assert service.instagram_cookies_file == path
     assert path.read_bytes() == b"# Netscape HTTP Cookie File\n"
 
 
@@ -276,6 +280,7 @@ def test_service_accepts_private_telegram_channel_id(tmp_path, monkeypatch) -> N
         post_existing=False,
         data_dir=tmp_path,
         cookies_file=None,
+        instagram_cookies_file=None,
         youtube_cookies_file=None,
         youtube_po_token_provider_url=None,
         web_host="127.0.0.1",
@@ -313,6 +318,7 @@ def test_service_discovers_private_channel_from_bot_updates(tmp_path, monkeypatc
         post_existing=False,
         data_dir=tmp_path,
         cookies_file=None,
+        instagram_cookies_file=None,
         youtube_cookies_file=None,
         youtube_po_token_provider_url=None,
         web_host="127.0.0.1",
@@ -361,6 +367,7 @@ def test_service_discovers_public_channel_by_username_without_duplicate(
         post_existing=False,
         data_dir=tmp_path,
         cookies_file=None,
+        instagram_cookies_file=None,
         youtube_cookies_file=None,
         youtube_po_token_provider_url=None,
         web_host="127.0.0.1",
@@ -397,3 +404,70 @@ def test_service_discovers_public_channel_by_username_without_duplicate(
     destinations = service.storage.telegram_destinations()
     assert [item.chat_id for item in destinations] == ["@public"]
     assert destinations[0].bot_token == "new-token"
+
+
+def test_service_replaces_old_public_username_after_channel_tag_change(
+    tmp_path, monkeypatch
+) -> None:
+    config = Config(
+        telegram_bot_token="token",
+        telegram_chat_id="@main",
+        tiktok_channels=(),
+        poll_interval_seconds=300,
+        scan_limit=15,
+        post_existing=False,
+        data_dir=tmp_path,
+        cookies_file=None,
+        instagram_cookies_file=None,
+        youtube_cookies_file=None,
+        youtube_po_token_provider_url=None,
+        web_host="127.0.0.1",
+        web_port=8080,
+        web_username=None,
+        web_password=None,
+    )
+
+    class UpdatesResponse:
+        def json(self):
+            return {
+                "ok": True,
+                "result": [
+                    {
+                        "channel_post": {
+                            "chat": {
+                                "id": -1001234567890,
+                                "title": "Public channel",
+                                "username": "old_public",
+                                "type": "channel",
+                            }
+                        }
+                    }
+                ],
+            }
+
+    class ChatResponse:
+        def json(self):
+            return {
+                "ok": True,
+                "result": {
+                    "id": -1001234567890,
+                    "title": "Public channel",
+                    "username": "new_public",
+                    "type": "channel",
+                },
+            }
+
+    def fake_get(url, *args, **kwargs):
+        return UpdatesResponse() if url.endswith("/getUpdates") else ChatResponse()
+
+    monkeypatch.setattr("app.service.requests.get", fake_get)
+    service = TikTokToTelegram(config)
+    service.storage.add_telegram_destination("Public channel", "@old_public", "old-token")
+
+    found = service.discover_telegram_destinations("new-token")
+
+    assert found == (TelegramChannel("Public channel", "@new_public"),)
+    destinations = service.storage.telegram_destinations()
+    by_chat_id = {item.chat_id: item for item in destinations}
+    assert "@old_public" not in by_chat_id
+    assert by_chat_id["@new_public"].telegram_id == "-1001234567890"

@@ -102,6 +102,7 @@
     <details class="settings-section"><summary>Cookies</summary>
       <p class="hint">Загрузите cookies.txt в Netscape-формате.</p>
       <form action="{{ url_for('update_cookies', service_name='tiktok') }}" method="post" enctype="multipart/form-data"><label for="tiktok_cookies">TikTok cookies</label><input id="tiktok_cookies" name="cookies_file" type="file" accept=".txt,text/plain" required><button class="secondary" type="submit">Обновить TikTok cookies</button></form>
+      <form action="{{ url_for('update_cookies', service_name='instagram') }}" method="post" enctype="multipart/form-data"><label for="instagram_cookies">Instagram cookies</label><input id="instagram_cookies" name="cookies_file" type="file" accept=".txt,text/plain" required><button class="secondary" type="submit">Обновить Instagram cookies</button></form>
       <form action="{{ url_for('update_cookies', service_name='youtube') }}" method="post" enctype="multipart/form-data"><label for="youtube_cookies">YouTube cookies</label><input id="youtube_cookies" name="cookies_file" type="file" accept=".txt,text/plain" required><button class="secondary" type="submit">Обновить YouTube cookies</button></form>
     </details>
   </div>

@@ -280,6 +280,9 @@ class TikTokToTelegram:
         self.tiktok_cookies_file = self._writable_cookie_copy(
             self.config.cookies_file, "tiktok-cookies.txt"
         )
+        self.instagram_cookies_file = self._writable_cookie_copy(
+            self.config.instagram_cookies_file, "instagram-cookies.txt"
+        )
         self.youtube_cookies_file = self._writable_cookie_copy(
             self.config.youtube_cookies_file, "youtube-cookies.txt"
         )
@@ -303,6 +306,25 @@ class TikTokToTelegram:
             for destination in self.storage.telegram_destinations()
         )
 
+    def _telegram_chat(self, bot_token: str, chat_id: str) -> dict[str, Any]:
+        try:
+            response = requests.get(
+                f"https://api.telegram.org/bot{bot_token}/getChat",
+                params={"chat_id": chat_id},
+                timeout=30,
+            )
+        except requests.RequestException:
+            raise ValueError("Не удалось проверить бота через Telegram API") from None
+        try:
+            payload = response.json()
+        except requests.JSONDecodeError as error:
+            raise ValueError("Telegram не ответил корректно на проверку бота") from error
+        if not payload.get("ok"):
+            raise ValueError(
+                "Telegram не подтвердил доступ. Проверьте токен, ID канала и права бота."
+            )
+        return dict(payload.get("result") or {})
+
     def delete_telegram_destination(self, chat_id: str) -> None:
         self.storage.delete_telegram_destination(chat_id.strip())
 
@@ -323,33 +345,27 @@ class TikTokToTelegram:
             raise ValueError(
                 "Укажите публичный @тег или отрицательный числовой ID канала или чата"
             )
-        try:
-            response = requests.get(
-                f"https://api.telegram.org/bot{bot_token}/getChat",
-                params={"chat_id": chat_id},
-                timeout=30,
-            )
-        except requests.RequestException:
-            raise ValueError("Не удалось проверить бота через Telegram API") from None
-        try:
-            payload = response.json()
-        except requests.JSONDecodeError as error:
-            raise ValueError("Telegram не ответил корректно на проверку бота") from error
-        if not payload.get("ok"):
-            raise ValueError(
-                "Telegram не подтвердил доступ. Проверьте токен, ID канала и права бота."
-            )
-        result = payload.get("result") or {}
+        result = self._telegram_chat(bot_token, chat_id)
         destination_type = str(result.get("type") or "channel")
         username = str(result.get("username") or "").strip().lstrip("@")
+        telegram_id = str(result.get("id") or "").strip() or None
         canonical_chat_id = f"@{username}" if username else chat_id
         if canonical_chat_id != chat_id:
             self.storage.canonicalize_telegram_destination(
-                chat_id, name, canonical_chat_id, bot_token, destination_type
+                chat_id,
+                name,
+                canonical_chat_id,
+                bot_token,
+                destination_type,
+                telegram_id,
             )
         else:
             self.storage.add_telegram_destination(
-                name, canonical_chat_id, bot_token, destination_type=destination_type
+                name,
+                canonical_chat_id,
+                bot_token,
+                destination_type=destination_type,
+                telegram_id=telegram_id,
             )
 
     def discover_telegram_destinations(
@@ -387,12 +403,22 @@ class TikTokToTelegram:
             if destination_type not in {"channel", "group", "supergroup"} or not chat.get("id"):
                 continue
             numeric_chat_id = str(chat["id"])
+            try:
+                chat = {**chat, **self._telegram_chat(bot_token, numeric_chat_id)}
+            except ValueError:
+                LOGGER.warning("Could not refresh Telegram chat %s", numeric_chat_id)
             username = str(chat.get("username") or "").strip().lstrip("@")
             chat_id = f"@{username}" if username else numeric_chat_id
             name = str(chat.get("title") or username or numeric_chat_id)
+            telegram_id = str(chat.get("id") or numeric_chat_id)
             if username:
                 self.storage.canonicalize_telegram_destination(
-                    numeric_chat_id, name, chat_id, bot_token, destination_type
+                    numeric_chat_id,
+                    name,
+                    chat_id,
+                    bot_token,
+                    destination_type,
+                    telegram_id,
                 )
             found[chat_id] = TelegramChannel(name, chat_id, destination_type)
         if not found:
@@ -407,6 +433,7 @@ class TikTokToTelegram:
                 channel.chat_id,
                 bot_token,
                 destination_type=channel.destination_type,
+                telegram_id=channel.chat_id if channel.chat_id.startswith("-") else None,
             )
         return tuple(found.values())
 
@@ -437,6 +464,9 @@ class TikTokToTelegram:
         if service_name == "tiktok":
             destination = self.config.data_dir / "tiktok-cookies.txt"
             attribute = "tiktok_cookies_file"
+        elif service_name == "instagram":
+            destination = self.config.data_dir / "instagram-cookies.txt"
+            attribute = "instagram_cookies_file"
         elif service_name == "youtube":
             destination = self.config.data_dir / "youtube-cookies.txt"
             attribute = "youtube_cookies_file"
@@ -531,7 +561,9 @@ class TikTokToTelegram:
         output_id = f"manual-{uuid.uuid4().hex}"
         options = {
             **self._ydl_options(
-                self.tiktok_cookies_file if platform == "tiktok" else None
+                self.tiktok_cookies_file
+                if platform == "tiktok"
+                else self.instagram_cookies_file
             ),
             "format": "best[ext=mp4][filesize<49M]/best[filesize<49M]/best[ext=mp4]/best",
             "merge_output_format": "mp4",

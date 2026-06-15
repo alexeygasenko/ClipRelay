@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}Media Hub{% endblock %}</title>
+  <title>{% block title %}ClipRelay{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body class="{% block body_class %}{% endblock %}">
@@ -12,9 +12,9 @@
   <div class="ambient ambient-three"></div>
   <main class="shell">
     <header>
-      {% block eyebrow %}<span class="eyebrow">Media Hub</span>{% endblock %}
+      {% block eyebrow %}<span class="eyebrow">ClipRelay</span>{% endblock %}
       <h1>{% block heading %}Видео без лишних шагов{% endblock %}</h1>
-      <p class="lead">{% block lead %}Публикуйте TikTok и Instagram в Telegram, скачивайте материалы с YouTube.{% endblock %}</p>
+      <p class="lead">{% block lead %}Единый пульт для видео, превью и Telegram-постов.{% endblock %}</p>
     </header>
     {% if error %}<div class="error">{{ error }}</div>{% endif %}
     {% block content %}{% endblock %}

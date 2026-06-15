@@ -293,8 +293,10 @@ video { width: 100%; max-height: 650px; border-radius: 26px; background: rgba(0,
 .instagram-logo { color: #ffd36e; }
 .youtube-logo { color: #ff4b61; }
 .source-panel { max-width: 940px; min-height: 390px; animation: editor-enter .38s ease both; }
+.youtube-card.source-panel { min-height: auto; }
 .source-panel[hidden], [data-tiktok-panel][hidden] { display: none; }
 .service-card { min-height: 370px; }
+.youtube-card.service-card { min-height: auto; }
 .service-heading { display: flex; gap: 14px; align-items: center; margin-bottom: 18px; }
 .service-heading h2, .youtube-meta h3 { margin: 0; line-height: 1.2; }
 .service-heading p, .youtube-meta p { margin: 4px 0 0; color: var(--muted); }
