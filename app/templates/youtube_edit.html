@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "channel_picker.html" import channel_picker %}
 {% block title %}Подготовка YouTube-поста{% endblock %}
 {% block body_class %}editor-page{% endblock %}
 {% block eyebrow %}<a class="eyebrow back-link" href="{{ url_for('index') }}">← На главную</a>{% endblock %}
@@ -13,11 +14,7 @@
   </div>
   <form class="card" action="{{ url_for('youtube_send', job_id=job.job_id) }}" method="post" autocomplete="off">
     <label for="chat_id">Опубликовать в Telegram-канал</label>
-    <select id="chat_id" name="chat_id" autocomplete="off">
-      {% for channel in telegram_channels %}
-      <option value="{{ channel.chat_id }}" {% if selected_chat_id is defined and selected_chat_id == channel.chat_id %}selected{% endif %}>{{ channel.name }}</option>
-      {% endfor %}
-    </select>
+    {{ channel_picker("chat_id", telegram_channels, selected_chat_id if selected_chat_id is defined else "") }}
 
     <div class="caption-builder">
       <label for="before_text">Текст до ссылки</label>

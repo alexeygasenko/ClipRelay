@@ -165,6 +165,9 @@ def test_home_has_post_builder_transition(tmp_path: Path) -> None:
     assert 'name="tiktok_url"' in response.text
     assert 'autocomplete="off"' in response.text
     assert "Second" in response.text
+    assert "@second" in response.text
+    assert "Вставьте ссылку на TikTok-канал или видео" in response.text
+    assert 'data-channel-picker' in response.text
 
 
 def test_youtube_post_can_be_prepared_and_sent(tmp_path: Path) -> None:

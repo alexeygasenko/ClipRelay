@@ -7,6 +7,20 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body class="{% block body_class %}{% endblock %}">
+  <svg class="liquid-glass-filters" aria-hidden="true">
+    <defs>
+      <filter id="liquid-glass-refraction" x="-12%" y="-18%" width="124%" height="136%" color-interpolation-filters="sRGB">
+        <feTurbulence type="fractalNoise" baseFrequency="0.009 0.018" numOctaves="2" seed="8" result="noise"/>
+        <feGaussianBlur in="noise" stdDeviation="2.2" result="softNoise"/>
+        <feDisplacementMap in="SourceGraphic" in2="softNoise" scale="18" xChannelSelector="R" yChannelSelector="G"/>
+      </filter>
+      <filter id="liquid-glass-control" x="-16%" y="-35%" width="132%" height="170%" color-interpolation-filters="sRGB">
+        <feTurbulence type="fractalNoise" baseFrequency="0.012 0.026" numOctaves="2" seed="12" result="noise"/>
+        <feGaussianBlur in="noise" stdDeviation="1.6" result="softNoise"/>
+        <feDisplacementMap in="SourceGraphic" in2="softNoise" scale="12" xChannelSelector="R" yChannelSelector="G"/>
+      </filter>
+    </defs>
+  </svg>
   <div class="ambient ambient-one"></div>
   <div class="ambient ambient-two"></div>
   <div class="ambient ambient-three"></div>
@@ -19,5 +33,34 @@
     {% if error %}<div class="error">{{ error }}</div>{% endif %}
     {% block content %}{% endblock %}
   </main>
+  <script>
+    document.addEventListener("click", (event) => {
+      const option = event.target.closest("[data-channel-value]");
+      const picker = event.target.closest("[data-channel-picker]");
+      document.querySelectorAll("[data-channel-picker].open").forEach((item) => {
+        if (item !== picker) {
+          item.classList.remove("open");
+          item.querySelector("[data-channel-menu]").hidden = true;
+        }
+      });
+      if (option) {
+        const owner = option.closest("[data-channel-picker]");
+        owner.querySelector("input[type=hidden]").value = option.dataset.channelValue;
+        owner.querySelector("[data-channel-label]").textContent = option.dataset.channelLabel;
+        owner.querySelector("[data-channel-tag]").textContent = option.dataset.channelValue;
+        owner.querySelectorAll("[data-channel-value]").forEach((item) => item.classList.toggle("selected", item === option));
+        owner.classList.remove("open");
+        owner.querySelector("[data-channel-menu]").hidden = true;
+        return;
+      }
+      const trigger = event.target.closest("[data-channel-trigger]");
+      if (trigger) {
+        const owner = trigger.closest("[data-channel-picker]");
+        const menu = owner.querySelector("[data-channel-menu]");
+        owner.classList.toggle("open");
+        menu.hidden = !owner.classList.contains("open");
+      }
+    });
+  </script>
 </body>
 </html>

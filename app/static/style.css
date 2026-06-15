@@ -14,6 +14,7 @@
 }
 
 * { box-sizing: border-box; }
+.liquid-glass-filters { position: fixed; width: 0; height: 0; pointer-events: none; }
 
 body {
   margin: 0;
@@ -89,14 +90,29 @@ h1 {
 .lead, .hint { color: var(--muted); }
 .lead { margin: 0; font-size: 18px; }
 
-.card, .caption-preview, .youtube-result, .check-row, video {
+.card, .caption-preview, .youtube-result, .check-row, .youtube-post-media, video {
+  position: relative;
   border: 1px solid var(--line);
   box-shadow:
-    inset 0 1px rgba(255, 255, 255, .22),
-    inset 0 -1px rgba(255, 255, 255, .035),
+    inset 0 1px rgba(255, 255, 255, .3),
+    inset 0 -1px rgba(255, 255, 255, .06),
+    inset 1px 0 rgba(255, 255, 255, .1),
     var(--shadow);
-  backdrop-filter: blur(34px) saturate(175%);
-  -webkit-backdrop-filter: blur(34px) saturate(175%);
+  backdrop-filter: blur(18px) saturate(165%);
+  -webkit-backdrop-filter: blur(18px) saturate(165%);
+}
+
+.card::after, .caption-preview::after, .youtube-result::after, .check-row::after, .youtube-post-media::after {
+  content: "";
+  position: absolute;
+  inset: 1px;
+  z-index: 0;
+  border-radius: inherit;
+  background:
+    radial-gradient(ellipse at 18% 0%, rgba(255, 255, 255, .28), transparent 34%),
+    linear-gradient(115deg, rgba(255, 255, 255, .13), transparent 18% 72%, rgba(115, 224, 255, .08));
+  opacity: .65;
+  pointer-events: none;
 }
 
 .card {
@@ -117,10 +133,10 @@ h1 {
   background: linear-gradient(180deg, rgba(255, 255, 255, .08), transparent);
   pointer-events: none;
 }
-.card > * { position: relative; }
+.card > *, .caption-preview > *, .youtube-result > *, .check-row > *, .youtube-post-media > * { position: relative; z-index: 1; }
 
 label { display: block; margin-bottom: 8px; color: #f2f5ff; font-weight: 600; }
-input, textarea, select {
+input, textarea {
   width: 100%;
   border: 1px solid var(--line-soft);
   border-radius: 15px;
@@ -132,16 +148,14 @@ input, textarea, select {
   backdrop-filter: blur(22px) saturate(150%);
   transition: border-color .2s, box-shadow .2s, background .2s;
 }
-input, select { padding: 15px 16px; margin-bottom: 16px; }
+input { padding: 15px 16px; margin-bottom: 16px; }
 textarea { min-height: 230px; padding: 14px; resize: vertical; }
 input::placeholder, textarea::placeholder { color: rgba(220, 228, 255, .38); }
-input:focus, textarea:focus, select:focus {
+input:focus, textarea:focus {
   border-color: rgba(113, 217, 255, .72);
   background: linear-gradient(145deg, rgba(255, 255, 255, .085), rgba(8, 12, 30, .22));
   box-shadow: 0 0 0 4px rgba(78, 220, 255, .09), inset 0 1px rgba(255, 255, 255, .16);
 }
-select { appearance: none; cursor: pointer; }
-select option { color: #f8faff; background: #151a31; }
 
 button, .button, .secondary {
   display: inline-flex;
@@ -163,8 +177,8 @@ button, .button, .secondary {
   letter-spacing: .005em;
   text-decoration: none;
   cursor: pointer;
-  backdrop-filter: blur(24px) saturate(180%);
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  backdrop-filter: blur(14px) saturate(180%);
+  -webkit-backdrop-filter: blur(14px) saturate(180%);
   transition: transform .18s, box-shadow .18s, background .18s, border-color .18s;
 }
 button::before, .button::before, .secondary::before {
@@ -254,8 +268,8 @@ video { width: 100%; max-height: 650px; border-radius: 26px; background: rgba(0,
 .youtube-result img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; }
 .youtube-meta { padding: 18px; }
 .youtube-meta h3 { font-size: 18px; }
-.download-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
-.download-actions > * { flex: 1; }
+.download-actions { display: grid; grid-template-columns: 1fr; gap: 10px; margin-top: 18px; }
+.download-actions > * { width: 100%; white-space: nowrap; }
 .youtube-post-media {
   overflow: hidden;
   border: 1px solid var(--line);
@@ -267,6 +281,63 @@ video { width: 100%; max-height: 650px; border-radius: 26px; background: rgba(0,
 .youtube-post-media img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; }
 .youtube-post-media h2 { margin: 20px 22px 4px; font-size: 20px; line-height: 1.25; }
 .youtube-post-media p { margin: 0 22px 22px; color: var(--muted); }
+
+.channel-picker {
+  position: relative;
+  z-index: 8;
+  margin-bottom: 16px;
+}
+.channel-picker-trigger, .channel-picker-option {
+  width: 100%;
+  min-height: 58px;
+  justify-content: space-between;
+  padding: 10px 14px 10px 16px;
+  text-align: left;
+}
+.channel-picker-trigger {
+  background:
+    radial-gradient(ellipse at 22% 0%, rgba(255, 255, 255, .19), transparent 45%),
+    rgba(255, 255, 255, .045);
+}
+.channel-picker-value, .channel-picker-option {
+  display: grid;
+  gap: 1px;
+}
+.channel-picker-value span, .channel-picker-option span { font-weight: 600; }
+.channel-picker-value small, .channel-picker-option small { color: var(--muted); font-size: 12px; }
+.channel-picker-chevron { color: rgba(235, 242, 255, .72); font-size: 22px; transition: transform .2s; }
+.channel-picker.open .channel-picker-chevron { transform: rotate(180deg); }
+.channel-picker-menu {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 7px;
+  border: 1px solid rgba(255, 255, 255, .28);
+  border-radius: 18px;
+  background:
+    radial-gradient(ellipse at 20% 0%, rgba(255, 255, 255, .22), transparent 44%),
+    rgba(18, 25, 48, .82);
+  box-shadow:
+    inset 0 1px rgba(255, 255, 255, .3),
+    0 22px 55px rgba(0, 0, 0, .38);
+  backdrop-filter: blur(26px) saturate(190%);
+  -webkit-backdrop-filter: blur(26px) saturate(190%);
+}
+.channel-picker-menu[hidden] { display: none; }
+.channel-picker-option {
+  min-height: 54px;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+.channel-picker-option:hover, .channel-picker-option.selected {
+  transform: none;
+  border-color: rgba(255, 255, 255, .22);
+  background: linear-gradient(135deg, rgba(139, 124, 255, .2), rgba(74, 211, 255, .13));
+  box-shadow: inset 0 1px rgba(255, 255, 255, .18);
+}
 .result-grid { display: grid; grid-template-columns: 1fr 1fr auto; align-items: center; gap: 20px; }
 .result-grid div { display: grid; }
 .result-grid strong { font-size: 42px; line-height: 1; }
@@ -316,6 +387,12 @@ video { width: 100%; max-height: 650px; border-radius: 26px; background: rgba(0,
 @keyframes editor-enter {
   from { opacity: 0; transform: translateY(18px) scale(.985); filter: blur(8px); }
   to { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+}
+
+@supports (backdrop-filter: url("#liquid-glass-refraction")) {
+  button, .button, .secondary, input, textarea, .channel-picker-trigger, .channel-picker-menu {
+    backdrop-filter: url("#liquid-glass-control") blur(9px) saturate(185%);
+  }
 }
 
 @media (max-width: 760px) {

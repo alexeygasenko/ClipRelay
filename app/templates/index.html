@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "channel_picker.html" import channel_picker %}
 {% block content %}
 <div class="home-grid">
   <section class="card service-card">
@@ -16,16 +17,12 @@
         name="tiktok_url"
         type="url"
         autocomplete="off"
-        placeholder="https://www.tiktok.com/@author или .../video/..."
+        placeholder="Вставьте ссылку на TikTok-канал или видео"
         value="{{ tiktok_url or '' }}"
         required
       >
       <label for="tiktok_chat_id">Telegram-канал</label>
-      <select id="tiktok_chat_id" name="chat_id" autocomplete="off">
-        {% for channel in telegram_channels %}
-        <option value="{{ channel.chat_id }}" {% if selected_chat_id is defined and selected_chat_id == channel.chat_id %}selected{% endif %}>{{ channel.name }}</option>
-        {% endfor %}
-      </select>
+      {{ channel_picker("tiktok_chat_id", telegram_channels, selected_chat_id if selected_chat_id is defined else "") }}
       <label class="check-row">
         <input type="checkbox" name="post_existing" autocomplete="off">
         <span>
