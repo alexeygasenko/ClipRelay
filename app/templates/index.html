@@ -2,12 +2,31 @@
 {% from "channel_picker.html" import channel_picker %}
 {% block content %}
 <nav class="source-tabs" aria-label="Источник видео">
-  <button class="source-tab active" type="button" data-source-tab="tiktok">TikTok</button>
-  <button class="source-tab" type="button" data-source-tab="instagram">Instagram</button>
-  <button class="source-tab" type="button" data-source-tab="youtube">YouTube</button>
+  <button class="source-tab" type="button" data-source-tab="tiktok" aria-label="Выбрать TikTok">
+    <span class="source-logo tiktok-logo" aria-hidden="true">
+      <svg viewBox="0 0 24 24"><path d="M14.4 3c.4 3 2.1 4.8 5 5v3.3a8.5 8.5 0 0 1-5-1.6v6.4c0 3.2-2.2 5.6-5.5 5.6-3 0-5.2-2-5.2-4.8 0-3.1 2.5-5 5.8-4.7v3.3c-1.4-.3-2.4.3-2.4 1.4 0 .9.7 1.5 1.8 1.5 1.2 0 2-.8 2-2.4V3h3.5z"/></svg>
+    </span>
+    TikTok
+  </button>
+  <button class="source-tab" type="button" data-source-tab="instagram" aria-label="Выбрать Instagram">
+    <span class="source-logo instagram-logo" aria-hidden="true">
+      <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="5"/><circle cx="12" cy="12" r="3.6"/><circle cx="16.8" cy="7.2" r="1"/></svg>
+    </span>
+    Instagram
+  </button>
+  <button class="source-tab" type="button" data-source-tab="youtube" aria-label="Выбрать YouTube">
+    <span class="source-logo youtube-logo" aria-hidden="true">
+      <svg viewBox="0 0 24 24"><path d="M21 8.2a3 3 0 0 0-2.1-2.1C17 5.6 12 5.6 12 5.6s-5 0-6.9.5A3 3 0 0 0 3 8.2 31 31 0 0 0 2.5 12a31 31 0 0 0 .5 3.8 3 3 0 0 0 2.1 2.1c1.9.5 6.9.5 6.9.5s5 0 6.9-.5a3 3 0 0 0 2.1-2.1c.4-1.4.5-3.8.5-3.8s0-2.4-.5-3.8z"/><path class="youtube-play" d="m10.2 15.2 5-3.2-5-3.2v6.4z"/></svg>
+    </span>
+    YouTube
+  </button>
 </nav>
 
-<section class="card service-card source-panel active" data-source-panel="tiktok">
+<section class="card service-card source-empty" data-source-empty>
+  <div class="service-heading"><span class="service-mark media-mark">→</span><div><h2>Выберите источник</h2><p>После выбора появятся поля для ссылки, скачивания и подготовки поста.</p></div></div>
+</section>
+
+<section class="card service-card source-panel" data-source-panel="tiktok" hidden>
   <div class="service-heading"><span class="service-mark tiktok-mark">TT</span><div><h2>TikTok</h2><p>Скачивание видео, публикация и импорт канала</p></div></div>
   <div class="mode-tabs">
     <button class="mode-tab active" type="button" data-tiktok-mode="video">Отдельное видео</button>
@@ -60,7 +79,7 @@
 <button class="settings-toggle" type="button" data-settings-open aria-label="Открыть настройки"><span></span><span></span><span></span></button>
 <div class="settings-overlay" data-settings-close></div>
 <aside class="settings-drawer {% if settings_open or request.args.get('settings') %}open{% endif %}" aria-label="Настройки">
-  <div class="settings-drawer-heading"><div><span class="eyebrow">Настройки</span><h2>Media Hub</h2></div></div>
+  <div class="settings-drawer-heading"><div><span class="eyebrow">Настройки</span></div></div>
   {% if settings_error %}<div class="error settings-error">{{ settings_error }}</div>{% endif %}
   {% if request.args.get("settings") %}<div class="settings-success">Настройки обновлены.</div>{% endif %}
   <div class="settings-grid">
@@ -101,6 +120,7 @@
 
   document.querySelectorAll("[data-source-tab]").forEach(tab => tab.addEventListener("click", () => {
     document.querySelectorAll("[data-source-tab]").forEach(item => item.classList.toggle("active", item === tab));
+    document.querySelector("[data-source-empty]").hidden = true;
     document.querySelectorAll("[data-source-panel]").forEach(panel => { panel.hidden = panel.dataset.sourcePanel !== tab.dataset.sourceTab; panel.classList.toggle("active", !panel.hidden); });
   }));
   document.querySelectorAll("[data-tiktok-mode]").forEach(tab => tab.addEventListener("click", () => {
