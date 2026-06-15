@@ -270,6 +270,15 @@ video { width: 100%; max-height: 650px; border-radius: 26px; background: rgba(0,
   min-height: auto;
   margin: 0;
 }
+.source-brand {
+  display: none;
+  grid-column: 1 / -1;
+  justify-self: start;
+  margin: 0 0 8px;
+  font-size: clamp(76px, 10vw, 136px);
+}
+.source-selecting .source-brand { display: block; }
+.source-tabs.selected .source-brand { display: none; }
 .mode-tabs { display: flex; gap: 8px; margin-bottom: 14px; }
 .source-tab, .mode-tab { flex: 1; background: rgba(224, 236, 255, .08); }
 .source-tab {
