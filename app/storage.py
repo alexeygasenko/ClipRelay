@@ -47,6 +47,14 @@ class Storage:
             )
             """
         )
+        self.connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS deleted_telegram_destinations (
+                chat_id TEXT PRIMARY KEY,
+                deleted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
         self.connection.commit()
 
     def has(self, video_id: str) -> bool:
@@ -89,6 +97,12 @@ class Storage:
     ) -> None:
         with self.lock:
             if not replace:
+                deleted = self.connection.execute(
+                    "SELECT 1 FROM deleted_telegram_destinations WHERE chat_id = ?",
+                    (chat_id,),
+                ).fetchone()
+                if deleted:
+                    return
                 existing = self.connection.execute(
                     "SELECT 1 FROM telegram_destinations WHERE chat_id = ?",
                     (chat_id,),
@@ -104,6 +118,11 @@ class Storage:
                         )
                         self.connection.commit()
                     return
+            else:
+                self.connection.execute(
+                    "DELETE FROM deleted_telegram_destinations WHERE chat_id = ?",
+                    (chat_id,),
+                )
             if is_default:
                 self.connection.execute(
                     "UPDATE telegram_destinations SET is_default = 0"
@@ -127,6 +146,69 @@ class Storage:
                 """
             )
             self.connection.execute(query, (name, chat_id, bot_token, int(is_default)))
+            self.connection.commit()
+
+    def delete_telegram_destination(
+        self, chat_id: str, *, remember: bool = True
+    ) -> None:
+        with self.lock:
+            count = self.connection.execute(
+                "SELECT COUNT(*) FROM telegram_destinations"
+            ).fetchone()[0]
+            if count <= 1:
+                raise ValueError("Нельзя удалить единственный Telegram-канал")
+            row = self.connection.execute(
+                "SELECT is_default FROM telegram_destinations WHERE chat_id = ?",
+                (chat_id,),
+            ).fetchone()
+            if not row:
+                raise ValueError("Telegram-канал уже удалён")
+            self.connection.execute(
+                "DELETE FROM telegram_destinations WHERE chat_id = ?", (chat_id,)
+            )
+            if remember:
+                self.connection.execute(
+                    "INSERT OR REPLACE INTO deleted_telegram_destinations(chat_id) VALUES (?)",
+                    (chat_id,),
+                )
+            if row[0]:
+                next_chat_id = self.connection.execute(
+                    "SELECT chat_id FROM telegram_destinations ORDER BY created_at LIMIT 1"
+                ).fetchone()[0]
+                self.connection.execute(
+                    "UPDATE telegram_destinations SET is_default = 1 WHERE chat_id = ?",
+                    (next_chat_id,),
+                )
+            self.connection.commit()
+
+    def canonicalize_telegram_destination(
+        self, previous_chat_id: str, name: str, chat_id: str, bot_token: str
+    ) -> None:
+        with self.lock:
+            previous = self.connection.execute(
+                "SELECT is_default FROM telegram_destinations WHERE chat_id = ?",
+                (previous_chat_id,),
+            ).fetchone()
+            existing = self.connection.execute(
+                "SELECT is_default FROM telegram_destinations WHERE chat_id = ?",
+                (chat_id,),
+            ).fetchone()
+            is_default = bool((previous and previous[0]) or (existing and existing[0]))
+            self.connection.execute(
+                "DELETE FROM telegram_destinations WHERE chat_id IN (?, ?)",
+                (previous_chat_id, chat_id),
+            )
+            self.connection.execute(
+                """
+                INSERT INTO telegram_destinations(name, chat_id, bot_token, is_default)
+                VALUES (?, ?, ?, ?)
+                """,
+                (name, chat_id, bot_token, int(is_default)),
+            )
+            self.connection.execute(
+                "DELETE FROM deleted_telegram_destinations WHERE chat_id = ?",
+                (chat_id,),
+            )
             self.connection.commit()
 
     def telegram_destinations(self) -> tuple[TelegramDestination, ...]:

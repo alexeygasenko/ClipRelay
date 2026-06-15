@@ -40,6 +40,8 @@ class Video:
     description: str
     url: str
     timestamp: int
+    platform: str = "tiktok"
+    author_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -75,6 +77,25 @@ def validate_tiktok_url(url: str) -> str:
     return url
 
 
+def validate_instagram_url(url: str) -> str:
+    url = url.strip()
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in {"http", "https"} or not (
+        host == "instagram.com" or host.endswith(".instagram.com")
+    ):
+        raise ValueError("Нужна полная ссылка на видео Instagram")
+    return url
+
+
+def is_instagram_url(url: str) -> bool:
+    try:
+        validate_instagram_url(url)
+        return True
+    except ValueError:
+        return False
+
+
 def validate_youtube_url(url: str) -> str:
     url = url.strip()
     parsed = urlparse(url)
@@ -100,6 +121,21 @@ def username_from_info(info: dict[str, Any], webpage_url: str) -> str:
         or info.get("uploader_id")
         or "tiktok"
     ).lstrip("@")
+
+
+def media_author_from_info(
+    info: dict[str, Any], webpage_url: str, platform: str
+) -> tuple[str, str]:
+    if platform == "instagram":
+        username = str(
+            info.get("uploader_id")
+            or info.get("uploader")
+            or info.get("channel")
+            or "instagram"
+        ).lstrip("@")
+        return username, f"https://www.instagram.com/{username}/"
+    username = username_from_info(info, webpage_url)
+    return username, f"https://www.tiktok.com/@{username}"
 
 
 def best_thumbnail_url(info: dict[str, Any]) -> str:
@@ -130,13 +166,21 @@ def build_caption(
     quote_text: str | None = None,
     before_text: str = "",
     after_text: str = "",
+    include_author: bool = True,
+    include_description: bool = True,
 ) -> str:
     author = html.escape(f"@{video.username}")
-    author_url = html.escape(f"https://www.tiktok.com/@{video.username}", quote=True)
+    author_url = html.escape(
+        video.author_url or f"https://www.tiktok.com/@{video.username}", quote=True
+    )
     author_link = f'<a href="{author_url}">{author}</a>'
     texts = [
         before_text.strip(),
-        video.description.strip() if quote_text is None else quote_text.strip(),
+        (
+            video.description.strip() if quote_text is None else quote_text.strip()
+        )
+        if include_description
+        else "",
         after_text.strip(),
     ]
 
@@ -144,7 +188,7 @@ def build_caption(
         before, quote, after = (
             html.escape(part) + ("…" if truncated and part else "") for part in parts
         )
-        sections = [author_link]
+        sections = [author_link] if include_author else []
         if before:
             sections.append(before)
         if quote:
@@ -249,6 +293,9 @@ class TikTokToTelegram:
             for destination in self.storage.telegram_destinations()
         )
 
+    def delete_telegram_destination(self, chat_id: str) -> None:
+        self.storage.delete_telegram_destination(chat_id.strip())
+
     def add_telegram_destination(
         self, name: str, chat_id: str, bot_token: str
     ) -> None:
@@ -312,14 +359,22 @@ class TikTokToTelegram:
             )
             if chat.get("type") != "channel" or not chat.get("id"):
                 continue
-            chat_id = str(chat["id"])
-            name = str(chat.get("title") or chat.get("username") or chat_id)
+            numeric_chat_id = str(chat["id"])
+            username = str(chat.get("username") or "").strip().lstrip("@")
+            chat_id = f"@{username}" if username else numeric_chat_id
+            name = str(chat.get("title") or username or numeric_chat_id)
+            if username:
+                self.storage.canonicalize_telegram_destination(
+                    numeric_chat_id, name, chat_id, bot_token
+                )
             found[chat_id] = TelegramChannel(name, chat_id)
         if not found:
             raise ValueError(
                 "Каналы не найдены. Добавьте бота администратором и опубликуйте новый пост."
             )
         for channel in found.values():
+            if channel.chat_id.startswith("@"):
+                continue
             self.storage.add_telegram_destination(
                 channel.name, channel.chat_id, bot_token
             )
@@ -422,10 +477,13 @@ class TikTokToTelegram:
         return path
 
     def prepare_url(self, url: str) -> tuple[Video, Path]:
-        url = validate_tiktok_url(url)
+        platform = "instagram" if is_instagram_url(url) else "tiktok"
+        url = validate_instagram_url(url) if platform == "instagram" else validate_tiktok_url(url)
         output_id = f"manual-{uuid.uuid4().hex}"
         options = {
-            **self._ydl_options(self.tiktok_cookies_file),
+            **self._ydl_options(
+                self.tiktok_cookies_file if platform == "tiktok" else None
+            ),
             "format": "best[ext=mp4][filesize<49M]/best[filesize<49M]/best[ext=mp4]/best",
             "merge_output_format": "mp4",
             "outtmpl": str(self.download_dir / f"{output_id}.%(ext)s"),
@@ -449,13 +507,15 @@ class TikTokToTelegram:
             raise ValueError("Видео больше лимита Telegram Bot API в 50 МБ")
 
         webpage_url = str(info.get("webpage_url") or url)
-        username = username_from_info(info, webpage_url)
+        username, author_url = media_author_from_info(info, webpage_url, platform)
         video = Video(
             video_id=str(info.get("id") or output_id),
             username=username,
             description=str(info.get("description") or info.get("title") or ""),
             url=webpage_url,
             timestamp=int(info.get("timestamp") or 0),
+            platform=platform,
+            author_url=author_url,
         )
         return video, path
 
@@ -590,6 +650,8 @@ class TikTokToTelegram:
         before_text: str = "",
         after_text: str = "",
         chat_id: str | None = None,
+        include_author: bool = True,
+        include_description: bool = True,
     ) -> None:
         target = self.storage.telegram_destination(chat_id)
         url = f"https://api.telegram.org/bot{target.bot_token}/sendVideo"
@@ -598,7 +660,14 @@ class TikTokToTelegram:
                 url,
                 data={
                     "chat_id": target.chat_id,
-                    "caption": build_caption(video, quote_text, before_text, after_text),
+                    "caption": build_caption(
+                        video,
+                        quote_text,
+                        before_text,
+                        after_text,
+                        include_author,
+                        include_description,
+                    ),
                     "parse_mode": "HTML",
                     "supports_streaming": "true",
                 },

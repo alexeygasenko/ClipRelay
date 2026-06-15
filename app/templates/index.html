@@ -4,20 +4,20 @@
 <div class="home-grid">
   <section class="card service-card">
     <div class="service-heading">
-      <span class="service-mark tiktok-mark">TT</span>
+      <span class="service-mark tiktok-mark media-mark">TT·IG</span>
       <div>
-        <h2>TikTok → Telegram</h2>
-        <p>Ролик или канал</p>
+        <h2>TikTok / Instagram → Telegram</h2>
+        <p>Ролик TikTok, Instagram или TikTok-канал</p>
       </div>
     </div>
     <form id="tiktok-form" action="{{ url_for('prepare') }}" method="post" autocomplete="off">
-      <label for="tiktok_url">Ссылка на TikTok</label>
+      <label for="tiktok_url">Ссылка на TikTok или Instagram</label>
       <input
         id="tiktok_url"
         name="tiktok_url"
         type="url"
         autocomplete="off"
-        placeholder="Вставьте ссылку на TikTok-канал или видео"
+        placeholder="Вставьте ссылку на TikTok, Instagram или TikTok-канал"
         value="{{ tiktok_url or '' }}"
         required
       >
@@ -86,7 +86,7 @@
       <p class="hint">Проще всего добавить бота администратором, опубликовать новый пост и найти канал по токену.</p>
       <div class="discover-box">
         <label for="discover_bot_token">Токен бота для поиска каналов</label>
-        <input id="discover_bot_token" form="discover-telegram-form" name="bot_token" type="password" autocomplete="new-password" placeholder="123456789:bot_token" required>
+        <input id="discover_bot_token" class="secret-input" form="discover-telegram-form" name="bot_token" type="text" autocomplete="off" data-lpignore="true" data-1p-ignore="true" spellcheck="false" placeholder="123456789:bot_token" required>
         <button class="secondary" form="discover-telegram-form" type="submit">Найти и добавить каналы бота</button>
       </div>
       <p class="settings-divider">или добавить вручную</p>
@@ -95,10 +95,28 @@
       <label for="telegram_chat_id">Тег или ID канала</label>
       <input id="telegram_chat_id" name="chat_id" autocomplete="off" placeholder="@channel или -1001234567890" required>
       <label for="telegram_bot_token">Токен бота</label>
-      <input id="telegram_bot_token" name="bot_token" type="password" autocomplete="new-password" placeholder="123456789:bot_token" required>
+      <input id="telegram_bot_token" class="secret-input" name="bot_token" type="text" autocomplete="off" data-lpignore="true" data-1p-ignore="true" spellcheck="false" placeholder="123456789:bot_token" required>
       <button type="submit">Добавить канал</button>
     </form>
     <form id="discover-telegram-form" action="{{ url_for('discover_telegram_channels') }}" method="post" autocomplete="off"></form>
+    <div class="saved-channels">
+      <h3>Добавленные каналы</h3>
+      <input type="search" autocomplete="off" placeholder="Найти добавленный канал" data-settings-channel-search>
+      <div class="saved-channel-list">
+        {% for channel in telegram_channels %}
+        <div class="saved-channel" data-settings-channel data-channel-search-value="{{ channel.name }} {{ channel.chat_id }}">
+          <span>
+            <strong>{{ channel.name }}</strong>
+            {% if not channel.chat_id.startswith("-100") %}<small>{{ channel.chat_id }}</small>{% endif %}
+          </span>
+          <form action="{{ url_for('delete_telegram_channel') }}" method="post">
+            <input type="hidden" name="chat_id" value="{{ channel.chat_id }}">
+            <button class="channel-delete secondary" type="submit" aria-label="Удалить {{ channel.name }}">×</button>
+          </form>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
     <div class="cookie-settings">
       <h3>Обновить cookies</h3>
       <p class="hint">Загрузите cookies.txt в Netscape-формате. Новые cookies применятся сразу.</p>

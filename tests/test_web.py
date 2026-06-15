@@ -29,8 +29,19 @@ class FakeService:
         before_text: str,
         after_text: str,
         chat_id: str,
+        include_author: bool = True,
+        include_description: bool = True,
     ) -> None:
-        self.published = (video, path, quote_text, before_text, after_text, chat_id)
+        self.published = (
+            video,
+            path,
+            quote_text,
+            before_text,
+            after_text,
+            chat_id,
+            include_author,
+            include_description,
+        )
 
     def import_channel(self, url: str, post_existing: bool, chat_id: str):
         self.imported = (url, post_existing, chat_id)
@@ -50,6 +61,9 @@ class FakeService:
     def discover_telegram_destinations(self, bot_token: str):
         self.discovered_token = bot_token
         return (TelegramChannel("Private", "-1001234567890"),)
+
+    def delete_telegram_destination(self, chat_id: str) -> None:
+        self.deleted_destination = chat_id
 
     def update_cookies(self, service_name: str, content: bytes) -> None:
         self.updated_cookies = (service_name, content)
@@ -106,6 +120,8 @@ def test_web_flow_uses_caption_builder_texts(tmp_path: Path) -> None:
         "До цитаты",
         "После цитаты",
         "@channel",
+        True,
+        True,
     )
     assert not path.exists()
 
@@ -150,6 +166,43 @@ def test_tiktok_channel_can_publish_existing(tmp_path: Path) -> None:
     assert "4" in response.text
 
 
+def test_instagram_video_opens_shared_post_builder(tmp_path: Path) -> None:
+    path = tmp_path / "video.mp4"
+    path.write_bytes(b"video")
+    client = create_app(make_config(tmp_path), FakeService(path)).test_client()
+
+    response = client.post(
+        "/prepare", data={"tiktok_url": "https://www.instagram.com/reel/abc/"}
+    )
+
+    assert response.status_code == 200
+    assert "Добавить автора" in response.text
+    assert "Добавить описание" in response.text
+
+
+def test_post_builder_can_disable_author_and_description(tmp_path: Path) -> None:
+    path = tmp_path / "video.mp4"
+    path.write_bytes(b"video")
+    service = FakeService(path)
+    client = create_app(make_config(tmp_path), service).test_client()
+    response = client.post(
+        "/prepare", data={"tiktok_url": "https://www.instagram.com/reel/abc/"}
+    )
+    job_id = response.text.split("/send/")[1].split('"')[0]
+
+    response = client.post(
+        f"/send/{job_id}",
+        data={
+            "caption_options_present": "1",
+            "before_text": "Только текст",
+            "quote_text": "Скрытое описание",
+        },
+    )
+
+    assert response.status_code == 302
+    assert service.published[-2:] == (False, False)
+
+
 def test_youtube_info_returns_download_links(tmp_path: Path) -> None:
     client = create_app(make_config(tmp_path), FakeService(tmp_path / "video.mp4")).test_client()
 
@@ -177,12 +230,15 @@ def test_home_has_post_builder_transition(tmp_path: Path) -> None:
     assert 'autocomplete="off"' in response.text
     assert "Second" in response.text
     assert "@second" in response.text
-    assert "Вставьте ссылку на TikTok-канал или видео" in response.text
+    assert "Вставьте ссылку на TikTok, Instagram или TikTok-канал" in response.text
     assert 'data-channel-picker' in response.text
     assert "Добавить Telegram-канал" in response.text
     assert "Обновить cookies" in response.text
     assert "@channel или -1001234567890" in response.text
     assert "Найти и добавить каналы бота" in response.text
+    assert "Найти добавленный канал" in response.text
+    assert "Найти канал" in response.text
+    assert 'autocomplete="off" data-lpignore="true"' in response.text
 
 
 def test_settings_can_add_telegram_channel_and_update_cookies(tmp_path: Path) -> None:
@@ -201,6 +257,10 @@ def test_settings_can_add_telegram_channel_and_update_cookies(tmp_path: Path) ->
     )
     assert response.status_code == 302
     assert service.discovered_token == "123:secret"
+
+    response = client.post("/settings/telegram/delete", data={"chat_id": "@second"})
+    assert response.status_code == 302
+    assert service.deleted_destination == "@second"
 
     response = client.post(
         "/settings/cookies/youtube",

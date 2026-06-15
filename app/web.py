@@ -14,7 +14,7 @@ from flask import Flask, Response, abort, jsonify, redirect, render_template, re
 from werkzeug.utils import secure_filename
 
 from app.config import Config, TelegramChannel
-from app.service import TikTokToTelegram, Video, YouTubeVideo, is_tiktok_video_url
+from app.service import TikTokToTelegram, Video, YouTubeVideo, is_instagram_url, is_tiktok_video_url
 
 LOGGER = logging.getLogger(__name__)
 JOB_TTL_SECONDS = 6 * 60 * 60
@@ -198,6 +198,19 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
                 settings_open=True,
             ), 400
 
+    @app.post("/settings/telegram/delete")
+    def delete_telegram_channel():
+        try:
+            service.delete_telegram_destination(request.form.get("chat_id", ""))
+            return redirect(url_for("index", settings="telegram-deleted"))
+        except Exception as error:
+            return render_template(
+                "index.html",
+                telegram_channels=telegram_channels(),
+                settings_error=str(error),
+                settings_open=True,
+            ), 400
+
     @app.post("/settings/cookies/<service_name>")
     def update_cookies(service_name: str):
         try:
@@ -222,7 +235,7 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
         selected_chat_id = request.form.get("chat_id", "")
         try:
             selected_chat_id = validate_chat_id(selected_chat_id)
-            if is_tiktok_video_url(tiktok_url):
+            if is_instagram_url(tiktok_url) or is_tiktok_video_url(tiktok_url):
                 video, path = service.prepare_url(tiktok_url)
                 job = jobs.add(video, path, selected_chat_id)
                 return render_template(
@@ -343,6 +356,13 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
         before_text = request.form.get("before_text", "")
         quote_text = request.form.get("quote_text", "")
         after_text = request.form.get("after_text", "")
+        options_present = request.form.get("caption_options_present") == "1"
+        include_author = (
+            request.form.get("include_author") == "on" if options_present else True
+        )
+        include_description = (
+            request.form.get("include_description") == "on" if options_present else True
+        )
         selected_chat_id = request.form.get("chat_id", job.selected_chat_id)
         try:
             service.publish(
@@ -352,6 +372,8 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
                 before_text,
                 after_text,
                 selected_chat_id,
+                include_author,
+                include_description,
             )
             service.storage.mark(job.video.video_id, job.video.username)
             jobs.remove(job_id)
@@ -364,6 +386,8 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
                 before_text=before_text,
                 quote_text=quote_text,
                 after_text=after_text,
+                include_author=include_author,
+                include_description=include_description,
                 selected_chat_id=selected_chat_id,
                 telegram_channels=telegram_channels(),
                 error=str(error),

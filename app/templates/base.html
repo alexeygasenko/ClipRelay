@@ -14,7 +14,7 @@
     <header>
       {% block eyebrow %}<span class="eyebrow">Media Hub</span>{% endblock %}
       <h1>{% block heading %}Видео без лишних шагов{% endblock %}</h1>
-      <p class="lead">{% block lead %}Публикуйте TikTok в Telegram и скачивайте материалы с YouTube.{% endblock %}</p>
+      <p class="lead">{% block lead %}Публикуйте TikTok и Instagram в Telegram, скачивайте материалы с YouTube.{% endblock %}</p>
     </header>
     {% if error %}<div class="error">{{ error }}</div>{% endif %}
     {% block content %}{% endblock %}
@@ -33,7 +33,7 @@
         const owner = option.closest("[data-channel-picker]");
         owner.querySelector("input[type=hidden]").value = option.dataset.channelValue;
         owner.querySelector("[data-channel-label]").textContent = option.dataset.channelLabel;
-        owner.querySelector("[data-channel-tag]").textContent = option.dataset.channelValue;
+        owner.querySelector("[data-channel-tag]").textContent = option.dataset.channelDisplay;
         owner.querySelectorAll("[data-channel-value]").forEach((item) => item.classList.toggle("selected", item === option));
         owner.classList.remove("open");
         owner.querySelector("[data-channel-menu]").hidden = true;
@@ -46,6 +46,15 @@
         owner.classList.toggle("open");
         menu.hidden = !owner.classList.contains("open");
       }
+    });
+    document.addEventListener("input", (event) => {
+      if (!event.target.matches("[data-channel-search], [data-settings-channel-search]")) return;
+      const query = event.target.value.trim().toLowerCase();
+      const selector = event.target.matches("[data-channel-search]") ? "[data-channel-value]" : "[data-settings-channel]";
+      const owner = event.target.closest("[data-channel-picker], .saved-channels");
+      owner.querySelectorAll(selector).forEach((item) => {
+        item.hidden = !item.dataset.channelSearchValue.toLowerCase().includes(query);
+      });
     });
   </script>
 </body>

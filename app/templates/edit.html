@@ -4,19 +4,30 @@
 {% block body_class %}editor-page{% endblock %}
 {% block eyebrow %}<a class="eyebrow back-link" href="{{ url_for('index') }}">← На главную</a>{% endblock %}
 {% block heading %}Проверьте публикацию{% endblock %}
-{% block lead %}Соберите подпись перед отправкой. Ссылка на автора будет добавлена автоматически.{% endblock %}
+{% block lead %}Соберите подпись перед отправкой и выберите, какие части оставить.{% endblock %}
 {% block content %}
 <section class="editor">
   <video controls preload="metadata" src="{{ url_for('preview', job_id=job.job_id) }}"></video>
   <form class="card" action="{{ url_for('send', job_id=job.job_id) }}" method="post" autocomplete="off">
     <div class="author">
       Автор:
-      <a href="https://www.tiktok.com/@{{ job.video.username }}" target="_blank" rel="noreferrer">
+      <a href="{{ job.video.author_url or ('https://www.tiktok.com/@' ~ job.video.username) }}" target="_blank" rel="noreferrer">
         @{{ job.video.username }}
       </a>
     </div>
     <label for="chat_id">Опубликовать в Telegram-канал</label>
     {{ channel_picker("chat_id", telegram_channels, selected_chat_id if selected_chat_id is defined else job.selected_chat_id) }}
+    <input type="hidden" name="caption_options_present" value="1">
+    <div class="caption-toggles">
+      <label class="check-row compact-check">
+        <input id="include_author" type="checkbox" name="include_author" {% if include_author is not defined or include_author %}checked{% endif %}>
+        <span><strong>Добавить автора</strong></span>
+      </label>
+      <label class="check-row compact-check">
+        <input id="include_description" type="checkbox" name="include_description" {% if include_description is not defined or include_description %}checked{% endif %}>
+        <span><strong>Добавить описание</strong></span>
+      </label>
+    </div>
     <div class="caption-builder">
       <label for="before_text">Текст до цитаты</label>
       <textarea id="before_text" name="before_text" rows="3" maxlength="3000" autocomplete="off" placeholder="Необязательный обычный текст">{{ before_text if before_text is defined else "" }}</textarea>
@@ -30,7 +41,7 @@
     <div class="caption-preview">
       <strong>Предпросмотр подписи</strong>
       <div id="caption-preview-content">
-        <a href="https://www.tiktok.com/@{{ job.video.username }}" target="_blank" rel="noreferrer">@{{ job.video.username }}</a>
+        <a id="preview-author" href="{{ job.video.author_url or ('https://www.tiktok.com/@' ~ job.video.username) }}" target="_blank" rel="noreferrer">@{{ job.video.username }}</a>
         <p id="preview-before"></p>
         <blockquote id="preview-quote"></blockquote>
         <p id="preview-after"></p>
@@ -54,14 +65,20 @@
     quote: document.getElementById("preview-quote"),
     after: document.getElementById("preview-after"),
   };
+  const includeAuthor = document.getElementById("include_author");
+  const includeDescription = document.getElementById("include_description");
   function updatePreview() {
     for (const key of Object.keys(fields)) {
       const value = fields[key].value.trim();
       previews[key].textContent = value;
       previews[key].hidden = !value;
     }
+    document.getElementById("preview-author").hidden = !includeAuthor.checked;
+    previews.quote.hidden = !includeDescription.checked || !fields.quote.value.trim();
   }
   Object.values(fields).forEach((field) => field.addEventListener("input", updatePreview));
+  includeAuthor.addEventListener("change", updatePreview);
+  includeDescription.addEventListener("change", updatePreview);
   updatePreview();
 </script>
 {% endblock %}

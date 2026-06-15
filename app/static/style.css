@@ -152,6 +152,7 @@ input, textarea {
 input { padding: 15px 16px; margin-bottom: 16px; }
 textarea { min-height: 230px; padding: 14px; resize: vertical; }
 input::placeholder, textarea::placeholder { color: rgba(238, 243, 255, .72); opacity: 1; }
+.secret-input { -webkit-text-security: disc; }
 input:focus, textarea:focus {
   border-color: rgba(113, 217, 255, .72);
   background: linear-gradient(145deg, rgba(255, 255, 255, .085), rgba(8, 12, 30, .22));
@@ -240,6 +241,7 @@ video { width: 100%; max-height: 650px; border-radius: 26px; background: rgba(0,
   font-weight: 900;
 }
 .tiktok-mark { background: linear-gradient(135deg, rgba(37, 244, 238, .62), rgba(254, 44, 85, .48)); color: #f7ffff; }
+.media-mark { font-size: 11px; }
 .youtube-mark { background: linear-gradient(135deg, rgba(255, 0, 51, .6), rgba(255, 92, 130, .38)); color: white; }
 .check-row {
   display: flex;
@@ -264,6 +266,8 @@ video { width: 100%; max-height: 650px; border-radius: 26px; background: rgba(0,
 .check-row span { display: grid; gap: 3px; }
 .check-row strong { font-weight: 600; }
 .check-row small { color: var(--muted); font-weight: 400; line-height: 1.35; }
+.caption-toggles { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 16px; }
+.compact-check { margin: 0; padding: 10px 12px; }
 .youtube-result { margin-top: 18px; overflow: hidden; border-radius: 19px; background: linear-gradient(145deg, rgba(255, 255, 255, .055), rgba(5, 8, 20, .16)); }
 .youtube-result img { display: block; width: 100%; aspect-ratio: 16 / 8.2; object-fit: cover; }
 .youtube-meta { padding: 14px; }
@@ -333,6 +337,7 @@ video { width: 100%; max-height: 650px; border-radius: 26px; background: rgba(0,
     inset 0 1px rgba(255, 255, 255, .3),
     0 22px 55px rgba(0, 0, 0, .38);
 }
+.channel-search { margin-bottom: 2px; padding: 10px 12px; }
 .channel-picker-menu[hidden] { display: none; }
 .channel-picker-option {
   min-height: 54px;
@@ -399,6 +404,14 @@ video { width: 100%; max-height: 650px; border-radius: 26px; background: rgba(0,
 .discover-box input { margin-bottom: 10px; }
 .settings-divider { display: flex; align-items: center; gap: 10px; margin: 18px 0; color: var(--muted); font-size: 13px; }
 .settings-divider::before, .settings-divider::after { content: ""; height: 1px; flex: 1; background: var(--line-soft); }
+.saved-channels h3 { margin-bottom: 12px; }
+.saved-channel-list { display: grid; gap: 7px; max-height: 230px; overflow-y: auto; }
+.saved-channel { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 10px 9px 13px; border: 1px solid var(--line-soft); border-radius: 13px; background: rgba(255, 255, 255, .055); }
+.saved-channel span { display: grid; min-width: 0; }
+.saved-channel strong, .saved-channel small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.saved-channel small { color: var(--muted); }
+.saved-channel form { flex: 0 0 auto; }
+.saved-channel .channel-delete { width: 34px; height: 34px; min-height: 0; padding: 0; font-size: 20px; }
 .cookie-settings { display: grid; align-content: start; gap: 12px; }
 .cookie-settings form { padding-top: 12px; border-top: 1px solid var(--line-soft); }
 .cookie-settings input[type="file"] { padding: 10px; }

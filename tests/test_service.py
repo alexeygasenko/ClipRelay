@@ -14,6 +14,8 @@ from app.service import (
     validate_tiktok_url,
     validate_youtube_url,
     is_tiktok_video_url,
+    is_instagram_url,
+    validate_instagram_url,
 )
 
 
@@ -69,6 +71,25 @@ def test_caption_truncates_all_builder_sections() -> None:
     assert "<blockquote>" in caption
 
 
+def test_caption_can_omit_author_and_description() -> None:
+    caption = build_caption(
+        Video(
+            "1",
+            "creator",
+            "description",
+            "https://instagram.com/reel/1",
+            0,
+            "instagram",
+            "https://instagram.com/creator/",
+        ),
+        before_text="Only text",
+        include_author=False,
+        include_description=False,
+    )
+
+    assert caption == "Only text"
+
+
 def test_youtube_caption_contains_link_and_custom_text() -> None:
     caption = build_youtube_caption(
         YouTubeVideo(
@@ -109,6 +130,12 @@ def test_manual_youtube_url_must_be_youtube() -> None:
     assert validate_youtube_url("https://youtu.be/abc") == "https://youtu.be/abc"
     with pytest.raises(ValueError):
         validate_youtube_url("https://example.com/video")
+
+
+def test_manual_instagram_url_must_be_instagram() -> None:
+    assert is_instagram_url("https://www.instagram.com/reel/abc/")
+    assert validate_instagram_url("https://instagram.com/p/abc/").endswith("/p/abc/")
+    assert not is_instagram_url("https://example.com/video")
 
 
 def test_best_thumbnail_uses_largest_resolution() -> None:
@@ -320,3 +347,53 @@ def test_service_discovers_private_channel_from_bot_updates(tmp_path, monkeypatc
     destination = service.storage.telegram_destination("-1001234567890")
     assert destination.name == "Private channel"
     assert destination.bot_token == "private-token"
+
+
+def test_service_discovers_public_channel_by_username_without_duplicate(
+    tmp_path, monkeypatch
+) -> None:
+    config = Config(
+        telegram_bot_token="token",
+        telegram_chat_id="@public",
+        tiktok_channels=(),
+        poll_interval_seconds=300,
+        scan_limit=15,
+        post_existing=False,
+        data_dir=tmp_path,
+        cookies_file=None,
+        youtube_cookies_file=None,
+        youtube_po_token_provider_url=None,
+        web_host="127.0.0.1",
+        web_port=8080,
+        web_username=None,
+        web_password=None,
+    )
+
+    class Response:
+        def json(self):
+            return {
+                "ok": True,
+                "result": [
+                    {
+                        "channel_post": {
+                            "chat": {
+                                "id": -1001234567890,
+                                "title": "Public channel",
+                                "username": "public",
+                                "type": "channel",
+                            }
+                        }
+                    }
+                ],
+            }
+
+    monkeypatch.setattr("app.service.requests.get", lambda *args, **kwargs: Response())
+    service = TikTokToTelegram(config)
+    service.storage.add_telegram_destination("Old duplicate", "-1001234567890", "token")
+
+    found = service.discover_telegram_destinations("new-token")
+
+    assert found == (TelegramChannel("Public channel", "@public"),)
+    destinations = service.storage.telegram_destinations()
+    assert [item.chat_id for item in destinations] == ["@public"]
+    assert destinations[0].bot_token == "new-token"
