@@ -117,11 +117,25 @@
   document.querySelectorAll("[data-settings-close]").forEach(item => item.addEventListener("click", () => setSettingsOpen(false)));
   setSettingsOpen(settingsDrawer.classList.contains("open"));
 
+  const sourceOrder = ["tiktok", "instagram", "youtube"];
+  let activeSourceIndex = null;
   document.querySelectorAll("[data-source-tab]").forEach(tab => tab.addEventListener("click", () => {
+    const nextSourceIndex = sourceOrder.indexOf(tab.dataset.sourceTab);
+    if (activeSourceIndex === nextSourceIndex) return;
+    const slideClass = activeSourceIndex === null ? "" : (nextSourceIndex > activeSourceIndex ? "slide-from-right" : "slide-from-left");
     document.querySelectorAll("[data-source-tab]").forEach(item => item.classList.toggle("active", item === tab));
     document.querySelector("[data-source-tabs]").classList.add("selected");
     document.body.classList.remove("source-selecting");
-    document.querySelectorAll("[data-source-panel]").forEach(panel => { panel.hidden = panel.dataset.sourcePanel !== tab.dataset.sourceTab; panel.classList.toggle("active", !panel.hidden); });
+    document.querySelectorAll("[data-source-panel]").forEach(panel => {
+      const isActive = panel.dataset.sourcePanel === tab.dataset.sourceTab;
+      panel.classList.remove("slide-from-right", "slide-from-left");
+      panel.hidden = !isActive;
+      panel.classList.toggle("active", isActive);
+      if (isActive && slideClass) {
+        panel.classList.add(slideClass);
+      }
+    });
+    activeSourceIndex = nextSourceIndex;
   }));
   document.querySelectorAll("[data-tiktok-mode]").forEach(tab => tab.addEventListener("click", () => {
     document.querySelectorAll("[data-tiktok-mode]").forEach(item => item.classList.toggle("active", item === tab));

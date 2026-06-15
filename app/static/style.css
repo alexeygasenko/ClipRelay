@@ -78,14 +78,17 @@ header { max-width: 760px; margin-bottom: 22px; }
   backdrop-filter: blur(18px) saturate(150%);
 }
 .brand-title {
+  display: inline-block;
+  max-width: 100%;
+  padding-right: .14em;
   margin-top: 12px;
   font-family: "Trebuchet MS", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
   font-size: clamp(58px, 8vw, 104px);
   font-weight: 900;
   line-height: .86;
-  letter-spacing: -.085em;
+  letter-spacing: -.065em;
   background:
-    linear-gradient(110deg, #ffffff 6%, #b7c2ff 38%, #62ecff 64%, #ff82ce 92%);
+    linear-gradient(110deg, #ffffff 0%, #b7c2ff 36%, #62ecff 66%, #ff82ce 100%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
@@ -275,6 +278,7 @@ video { width: 100%; max-height: 650px; border-radius: 26px; background: rgba(0,
   grid-column: 1 / -1;
   justify-self: start;
   margin: 0 0 8px;
+  padding-right: .18em;
   font-size: clamp(76px, 10vw, 136px);
 }
 .source-selecting .source-brand { display: block; }
@@ -327,7 +331,14 @@ video { width: 100%; max-height: 650px; border-radius: 26px; background: rgba(0,
 .tiktok-logo { color: #62f8ff; filter: drop-shadow(2px 2px 0 rgba(254, 44, 85, .7)); }
 .instagram-logo { color: #ffd36e; }
 .youtube-logo { color: #ff4b61; }
-.source-panel { max-width: 940px; min-height: 390px; animation: editor-enter .38s ease both; }
+.source-panel {
+  max-width: 940px;
+  min-height: 390px;
+  animation: editor-enter .38s ease both;
+  will-change: transform, opacity, filter;
+}
+.source-panel.slide-from-right { animation-name: panel-enter-from-right; }
+.source-panel.slide-from-left { animation-name: panel-enter-from-left; }
 .youtube-card.source-panel { min-height: auto; }
 .source-panel[hidden], [data-tiktok-panel][hidden] { display: none; }
 .service-card { min-height: 370px; }
@@ -649,6 +660,16 @@ video { width: 100%; max-height: 650px; border-radius: 26px; background: rgba(0,
 @keyframes editor-enter {
   from { opacity: 0; transform: translateY(18px) scale(.985); filter: blur(8px); }
   to { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+}
+@keyframes panel-enter-from-right {
+  from { opacity: 0; transform: translateX(100vw); filter: blur(10px); }
+  72% { opacity: 1; transform: translateX(-10px); filter: blur(0); }
+  to { opacity: 1; transform: translateX(0); filter: blur(0); }
+}
+@keyframes panel-enter-from-left {
+  from { opacity: 0; transform: translateX(-100vw); filter: blur(10px); }
+  72% { opacity: 1; transform: translateX(10px); filter: blur(0); }
+  to { opacity: 1; transform: translateX(0); filter: blur(0); }
 }
 
 @media (max-width: 760px) {
