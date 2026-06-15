@@ -24,3 +24,29 @@ def test_deleted_config_destination_does_not_return(tmp_path) -> None:
     storage.add_telegram_destination("Other", "@other", "token", replace=False)
 
     assert [item.chat_id for item in storage.telegram_destinations()] == ["@main"]
+
+
+def test_destinations_can_be_ordered_and_include_chat_type(tmp_path) -> None:
+    storage = Storage(tmp_path / "state.sqlite3")
+    storage.add_telegram_destination("Channel", "@channel", "token", is_default=True)
+    storage.add_telegram_destination(
+        "Chat", "-123", "token", destination_type="supergroup"
+    )
+
+    storage.move_telegram_destination("-123", -1)
+
+    destinations = storage.telegram_destinations()
+    assert [item.chat_id for item in destinations] == ["-123", "@channel"]
+    assert destinations[0].destination_type == "supergroup"
+
+
+def test_monitored_tiktok_channels_and_interval_are_persisted(tmp_path) -> None:
+    storage = Storage(tmp_path / "state.sqlite3")
+    storage.add_monitored_tiktok_channel("author")
+    storage.set_setting("poll_interval_seconds", "120")
+
+    assert storage.monitored_tiktok_channels() == ("author",)
+    assert storage.setting("poll_interval_seconds", "300") == "120"
+
+    storage.delete_monitored_tiktok_channel("author")
+    assert storage.monitored_tiktok_channels() == ()

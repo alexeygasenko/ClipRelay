@@ -138,6 +138,24 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
             raise ValueError("Выбран неизвестный Telegram-канал")
         return selected
 
+    def monitored_tiktok_channels() -> tuple[str, ...]:
+        if hasattr(service, "monitored_tiktok_channels"):
+            return service.monitored_tiktok_channels()
+        return config.tiktok_channels
+
+    def poll_interval_seconds() -> int:
+        if hasattr(service, "poll_interval_seconds"):
+            return service.poll_interval_seconds()
+        return config.poll_interval_seconds
+
+    def index_context(**extra):
+        return {
+            "telegram_channels": telegram_channels(),
+            "monitored_tiktok_channels": monitored_tiktok_channels(),
+            "poll_interval_seconds": poll_interval_seconds(),
+            **extra,
+        }
+
     @app.before_request
     def require_auth() -> Response | None:
         if not config.web_username or not config.web_password:
@@ -158,7 +176,7 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
 
     @app.get("/")
     def index() -> str:
-        return render_template("index.html", telegram_channels=telegram_channels())
+        return render_template("index.html", **index_context())
 
     @app.post("/settings/telegram")
     def add_telegram_channel():
@@ -211,6 +229,48 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
                 settings_open=True,
             ), 400
 
+    @app.post("/settings/telegram/move")
+    def move_telegram_channel():
+        try:
+            service.move_telegram_destination(
+                request.form.get("chat_id", ""), request.form.get("direction", "")
+            )
+            return redirect(url_for("index", settings="telegram-moved"))
+        except Exception as error:
+            return render_template(
+                "index.html", **index_context(settings_error=str(error), settings_open=True)
+            ), 400
+
+    @app.post("/settings/tiktok/monitor")
+    def add_monitored_tiktok_channel():
+        try:
+            service.add_monitored_tiktok_channel(request.form.get("channel", ""))
+            return redirect(url_for("index", settings="tiktok-monitor-added"))
+        except Exception as error:
+            return render_template(
+                "index.html", **index_context(settings_error=str(error), settings_open=True)
+            ), 400
+
+    @app.post("/settings/tiktok/monitor/delete")
+    def delete_monitored_tiktok_channel():
+        try:
+            service.delete_monitored_tiktok_channel(request.form.get("channel", ""))
+            return redirect(url_for("index", settings="tiktok-monitor-deleted"))
+        except Exception as error:
+            return render_template(
+                "index.html", **index_context(settings_error=str(error), settings_open=True)
+            ), 400
+
+    @app.post("/settings/tiktok/interval")
+    def update_tiktok_interval():
+        try:
+            service.set_poll_interval_seconds(request.form.get("poll_interval_seconds", ""))
+            return redirect(url_for("index", settings="tiktok-interval-updated"))
+        except Exception as error:
+            return render_template(
+                "index.html", **index_context(settings_error=str(error), settings_open=True)
+            ), 400
+
     @app.post("/settings/cookies/<service_name>")
     def update_cookies(service_name: str):
         try:
@@ -261,6 +321,43 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
                 telegram_channels=telegram_channels(),
                 selected_chat_id=selected_chat_id,
             ), 400
+
+    @app.post("/media/info")
+    def media_info():
+        media_url = request.form.get("media_url", "").strip()
+        try:
+            video, path = service.prepare_url(media_url)
+            selected_chat_id = validate_chat_id(request.form.get("chat_id", ""))
+            job = jobs.add(video, path, selected_chat_id)
+            return jsonify(
+                {
+                    "job_id": job.job_id,
+                    "description": video.description,
+                    "author": f"@{video.username}",
+                    "preview_url": url_for("preview", job_id=job.job_id),
+                    "video_download_url": url_for("media_video", job_id=job.job_id),
+                    "post_url": url_for("media_post", job_id=job.job_id),
+                }
+            )
+        except Exception as error:
+            LOGGER.exception("Failed to inspect media URL %s", media_url)
+            return jsonify({"error": str(error)}), 400
+
+    @app.get("/media/video/<job_id>")
+    def media_video(job_id: str):
+        job = jobs.get(job_id)
+        return send_file(
+            job.path,
+            as_attachment=True,
+            download_name=f"{secure_filename(job.video.username)}-{job.video.video_id}{job.path.suffix}",
+            conditional=True,
+        )
+
+    @app.get("/media/post/<job_id>")
+    def media_post(job_id: str):
+        return render_template(
+            "edit.html", job=jobs.get(job_id), telegram_channels=telegram_channels()
+        )
 
     @app.post("/youtube/info")
     def youtube_info():

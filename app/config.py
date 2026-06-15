@@ -45,6 +45,7 @@ def _config_path(value: str, config_file: Path) -> Path | None:
 class TelegramChannel:
     name: str
     chat_id: str
+    destination_type: str = "channel"
 
 
 def _telegram_channels(value: Any, default_chat_id: str) -> tuple[TelegramChannel, ...]:

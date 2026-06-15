@@ -65,6 +65,18 @@ class FakeService:
     def delete_telegram_destination(self, chat_id: str) -> None:
         self.deleted_destination = chat_id
 
+    def move_telegram_destination(self, chat_id: str, direction: str) -> None:
+        self.moved_destination = (chat_id, direction)
+
+    def add_monitored_tiktok_channel(self, channel: str) -> None:
+        self.added_monitor = channel
+
+    def delete_monitored_tiktok_channel(self, channel: str) -> None:
+        self.deleted_monitor = channel
+
+    def set_poll_interval_seconds(self, value: str) -> None:
+        self.updated_interval = value
+
     def update_cookies(self, service_name: str, content: bytes) -> None:
         self.updated_cookies = (service_name, content)
 
@@ -230,13 +242,15 @@ def test_home_has_post_builder_transition(tmp_path: Path) -> None:
     assert 'autocomplete="off"' in response.text
     assert "Second" in response.text
     assert "@second" in response.text
-    assert "Вставьте ссылку на TikTok, Instagram или TikTok-канал" in response.text
+    assert 'data-source-tab="tiktok"' in response.text
+    assert 'data-source-tab="instagram"' in response.text
+    assert 'data-source-tab="youtube"' in response.text
+    assert "Вставьте ссылку на видео" in response.text
     assert 'data-channel-picker' in response.text
-    assert "Добавить Telegram-канал" in response.text
-    assert "Обновить cookies" in response.text
-    assert "@channel или -1001234567890" in response.text
-    assert "Найти и добавить каналы бота" in response.text
-    assert "Найти добавленный канал" in response.text
+    assert "Telegram-каналы и чаты" in response.text
+    assert "Cookies" in response.text
+    assert "Найти каналы и чаты" in response.text
+    assert "Поиск по названию или тегу" in response.text
     assert "Найти канал" in response.text
     assert 'autocomplete="off" data-lpignore="true"' in response.text
 
@@ -272,6 +286,45 @@ def test_settings_can_add_telegram_channel_and_update_cookies(tmp_path: Path) ->
         "youtube",
         b"# Netscape HTTP Cookie File\n",
     )
+
+
+def test_settings_can_order_destinations_and_manage_monitoring(tmp_path: Path) -> None:
+    service = FakeService(tmp_path / "video.mp4")
+    client = create_app(make_config(tmp_path), service).test_client()
+
+    assert client.post(
+        "/settings/telegram/move", data={"chat_id": "@second", "direction": "up"}
+    ).status_code == 302
+    assert service.moved_destination == ("@second", "up")
+
+    assert client.post(
+        "/settings/tiktok/monitor", data={"channel": "@author"}
+    ).status_code == 302
+    assert service.added_monitor == "@author"
+
+    assert client.post(
+        "/settings/tiktok/interval", data={"poll_interval_seconds": "120"}
+    ).status_code == 302
+    assert service.updated_interval == "120"
+
+
+def test_tiktok_and_instagram_media_info_returns_download_and_post_links(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "video.mp4"
+    path.write_bytes(b"video")
+    client = create_app(make_config(tmp_path), FakeService(path)).test_client()
+
+    response = client.post(
+        "/media/info",
+        data={"media_url": "https://www.instagram.com/reel/abc/", "chat_id": "@second"},
+    )
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert "/media/video/" in payload["video_download_url"]
+    assert "/media/post/" in payload["post_url"]
+    assert "/preview/" in payload["preview_url"]
 
 
 def test_youtube_post_can_be_prepared_and_sent(tmp_path: Path) -> None:

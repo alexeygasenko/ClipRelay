@@ -268,6 +268,14 @@ class TikTokToTelegram:
                 is_default=channel.chat_id == self.config.telegram_chat_id,
                 replace=False,
             )
+        for channel in self.config.tiktok_channels:
+            username, _ = normalize_channel(channel)
+            self.storage.add_monitored_tiktok_channel(username)
+        self.storage.set_setting(
+            "poll_interval_seconds",
+            str(self.config.poll_interval_seconds),
+            only_if_missing=True,
+        )
         self.ydl_lock = threading.Lock()
         self.tiktok_cookies_file = self._writable_cookie_copy(
             self.config.cookies_file, "tiktok-cookies.txt"
@@ -289,12 +297,19 @@ class TikTokToTelegram:
 
     def telegram_channels(self) -> tuple[TelegramChannel, ...]:
         return tuple(
-            TelegramChannel(destination.name, destination.chat_id)
+            TelegramChannel(
+                destination.name, destination.chat_id, destination.destination_type
+            )
             for destination in self.storage.telegram_destinations()
         )
 
     def delete_telegram_destination(self, chat_id: str) -> None:
         self.storage.delete_telegram_destination(chat_id.strip())
+
+    def move_telegram_destination(self, chat_id: str, direction: str) -> None:
+        self.storage.move_telegram_destination(
+            chat_id.strip(), -1 if direction == "up" else 1
+        )
 
     def add_telegram_destination(
         self, name: str, chat_id: str, bot_token: str
@@ -304,9 +319,9 @@ class TikTokToTelegram:
         bot_token = bot_token.strip()
         if not name or not chat_id or not bot_token:
             raise ValueError("Укажите название, ID канала и токен бота")
-        if not chat_id.startswith("@") and not re.fullmatch(r"-100\d+", chat_id):
+        if not chat_id.startswith("@") and not re.fullmatch(r"-\d+", chat_id):
             raise ValueError(
-                "Укажите публичный @тег или числовой ID приватного канала вида -100..."
+                "Укажите публичный @тег или отрицательный числовой ID канала или чата"
             )
         try:
             response = requests.get(
@@ -324,7 +339,18 @@ class TikTokToTelegram:
             raise ValueError(
                 "Telegram не подтвердил доступ. Проверьте токен, ID канала и права бота."
             )
-        self.storage.add_telegram_destination(name, chat_id, bot_token)
+        result = payload.get("result") or {}
+        destination_type = str(result.get("type") or "channel")
+        username = str(result.get("username") or "").strip().lstrip("@")
+        canonical_chat_id = f"@{username}" if username else chat_id
+        if canonical_chat_id != chat_id:
+            self.storage.canonicalize_telegram_destination(
+                chat_id, name, canonical_chat_id, bot_token, destination_type
+            )
+        else:
+            self.storage.add_telegram_destination(
+                name, canonical_chat_id, bot_token, destination_type=destination_type
+            )
 
     def discover_telegram_destinations(
         self, bot_token: str
@@ -357,7 +383,8 @@ class TikTokToTelegram:
                 or (update.get("my_chat_member") or {}).get("chat")
                 or {}
             )
-            if chat.get("type") != "channel" or not chat.get("id"):
+            destination_type = str(chat.get("type") or "")
+            if destination_type not in {"channel", "group", "supergroup"} or not chat.get("id"):
                 continue
             numeric_chat_id = str(chat["id"])
             username = str(chat.get("username") or "").strip().lstrip("@")
@@ -365,9 +392,9 @@ class TikTokToTelegram:
             name = str(chat.get("title") or username or numeric_chat_id)
             if username:
                 self.storage.canonicalize_telegram_destination(
-                    numeric_chat_id, name, chat_id, bot_token
+                    numeric_chat_id, name, chat_id, bot_token, destination_type
                 )
-            found[chat_id] = TelegramChannel(name, chat_id)
+            found[chat_id] = TelegramChannel(name, chat_id, destination_type)
         if not found:
             raise ValueError(
                 "Каналы не найдены. Добавьте бота администратором и опубликуйте новый пост."
@@ -376,9 +403,31 @@ class TikTokToTelegram:
             if channel.chat_id.startswith("@"):
                 continue
             self.storage.add_telegram_destination(
-                channel.name, channel.chat_id, bot_token
+                channel.name,
+                channel.chat_id,
+                bot_token,
+                destination_type=channel.destination_type,
             )
         return tuple(found.values())
+
+    def monitored_tiktok_channels(self) -> tuple[str, ...]:
+        return self.storage.monitored_tiktok_channels()
+
+    def add_monitored_tiktok_channel(self, channel: str) -> str:
+        username, _ = normalize_channel(channel)
+        self.storage.add_monitored_tiktok_channel(username)
+        return username
+
+    def delete_monitored_tiktok_channel(self, channel: str) -> None:
+        self.storage.delete_monitored_tiktok_channel(normalize_channel(channel)[0])
+
+    def poll_interval_seconds(self) -> int:
+        return max(30, int(self.storage.setting("poll_interval_seconds", "300")))
+
+    def set_poll_interval_seconds(self, value: str) -> int:
+        interval = max(30, int(value))
+        self.storage.set_setting("poll_interval_seconds", str(interval))
+        return interval
 
     def update_cookies(self, service_name: str, content: bytes) -> Path:
         if len(content) > 5 * 1024 * 1024:
@@ -618,6 +667,7 @@ class TikTokToTelegram:
         self, channel: str, post_existing: bool, chat_id: str | None = None
     ) -> tuple[int, int]:
         username, _ = normalize_channel(channel)
+        self.storage.add_monitored_tiktok_channel(username)
         destination = self.storage.telegram_destination(chat_id).chat_id
         videos = self.scan(channel)
         if not post_existing:
@@ -731,11 +781,11 @@ class TikTokToTelegram:
         self.storage.mark_channel_initialized(username)
 
     def run_forever(self) -> None:
-        LOGGER.info("Started; polling every %d seconds", self.config.poll_interval_seconds)
+        LOGGER.info("TikTok monitor started")
         while True:
-            for channel in self.config.tiktok_channels:
+            for channel in self.monitored_tiktok_channels():
                 try:
                     self.process_channel(channel)
                 except Exception:
                     LOGGER.exception("Failed to process channel %s", channel)
-            time.sleep(self.config.poll_interval_seconds)
+            time.sleep(self.poll_interval_seconds())

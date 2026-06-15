@@ -12,6 +12,8 @@ class TelegramDestination:
     chat_id: str
     bot_token: str
     is_default: bool = False
+    destination_type: str = "channel"
+    sort_order: int = 0
 
 
 class Storage:
@@ -47,11 +49,41 @@ class Storage:
             )
             """
         )
+        columns = {
+            row[1]
+            for row in self.connection.execute(
+                "PRAGMA table_info(telegram_destinations)"
+            ).fetchall()
+        }
+        if "destination_type" not in columns:
+            self.connection.execute(
+                "ALTER TABLE telegram_destinations ADD COLUMN destination_type TEXT NOT NULL DEFAULT 'channel'"
+            )
+        if "sort_order" not in columns:
+            self.connection.execute(
+                "ALTER TABLE telegram_destinations ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0"
+            )
         self.connection.execute(
             """
             CREATE TABLE IF NOT EXISTS deleted_telegram_destinations (
                 chat_id TEXT PRIMARY KEY,
                 deleted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS monitored_tiktok_channels (
+                channel TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             )
             """
         )
@@ -94,6 +126,7 @@ class Storage:
         *,
         is_default: bool = False,
         replace: bool = True,
+        destination_type: str = "channel",
     ) -> None:
         with self.lock:
             if not replace:
@@ -129,11 +162,12 @@ class Storage:
                 )
             query = (
                 """
-                INSERT INTO telegram_destinations(name, chat_id, bot_token, is_default)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO telegram_destinations(name, chat_id, bot_token, is_default, destination_type, sort_order)
+                VALUES (?, ?, ?, ?, ?, COALESCE((SELECT MAX(sort_order) + 1 FROM telegram_destinations), 0))
                 ON CONFLICT(chat_id) DO UPDATE SET
                     name = excluded.name,
                     bot_token = excluded.bot_token,
+                    destination_type = excluded.destination_type,
                     is_default = CASE
                         WHEN excluded.is_default = 1 THEN 1
                         ELSE telegram_destinations.is_default
@@ -141,11 +175,13 @@ class Storage:
                 """
                 if replace
                 else """
-                INSERT OR IGNORE INTO telegram_destinations(name, chat_id, bot_token, is_default)
-                VALUES (?, ?, ?, ?)
+                INSERT OR IGNORE INTO telegram_destinations(name, chat_id, bot_token, is_default, destination_type, sort_order)
+                VALUES (?, ?, ?, ?, ?, COALESCE((SELECT MAX(sort_order) + 1 FROM telegram_destinations), 0))
                 """
             )
-            self.connection.execute(query, (name, chat_id, bot_token, int(is_default)))
+            self.connection.execute(
+                query, (name, chat_id, bot_token, int(is_default), destination_type)
+            )
             self.connection.commit()
 
     def delete_telegram_destination(
@@ -173,7 +209,7 @@ class Storage:
                 )
             if row[0]:
                 next_chat_id = self.connection.execute(
-                    "SELECT chat_id FROM telegram_destinations ORDER BY created_at LIMIT 1"
+                    "SELECT chat_id FROM telegram_destinations ORDER BY sort_order, created_at LIMIT 1"
                 ).fetchone()[0]
                 self.connection.execute(
                     "UPDATE telegram_destinations SET is_default = 1 WHERE chat_id = ?",
@@ -182,28 +218,36 @@ class Storage:
             self.connection.commit()
 
     def canonicalize_telegram_destination(
-        self, previous_chat_id: str, name: str, chat_id: str, bot_token: str
+        self,
+        previous_chat_id: str,
+        name: str,
+        chat_id: str,
+        bot_token: str,
+        destination_type: str = "channel",
     ) -> None:
         with self.lock:
             previous = self.connection.execute(
-                "SELECT is_default FROM telegram_destinations WHERE chat_id = ?",
+                "SELECT is_default, sort_order FROM telegram_destinations WHERE chat_id = ?",
                 (previous_chat_id,),
             ).fetchone()
             existing = self.connection.execute(
-                "SELECT is_default FROM telegram_destinations WHERE chat_id = ?",
+                "SELECT is_default, sort_order FROM telegram_destinations WHERE chat_id = ?",
                 (chat_id,),
             ).fetchone()
             is_default = bool((previous and previous[0]) or (existing and existing[0]))
+            sort_order = min(
+                [row[1] for row in (previous, existing) if row is not None] or [0]
+            )
             self.connection.execute(
                 "DELETE FROM telegram_destinations WHERE chat_id IN (?, ?)",
                 (previous_chat_id, chat_id),
             )
             self.connection.execute(
                 """
-                INSERT INTO telegram_destinations(name, chat_id, bot_token, is_default)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO telegram_destinations(name, chat_id, bot_token, is_default, destination_type, sort_order)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (name, chat_id, bot_token, int(is_default)),
+                (name, chat_id, bot_token, int(is_default), destination_type, sort_order),
             )
             self.connection.execute(
                 "DELETE FROM deleted_telegram_destinations WHERE chat_id = ?",
@@ -215,14 +259,16 @@ class Storage:
         with self.lock:
             rows = self.connection.execute(
                 """
-                SELECT name, chat_id, bot_token, is_default
+                SELECT name, chat_id, bot_token, is_default, destination_type, sort_order
                 FROM telegram_destinations
-                ORDER BY is_default DESC, name COLLATE NOCASE, chat_id
+                ORDER BY sort_order, is_default DESC, name COLLATE NOCASE, chat_id
                 """
             ).fetchall()
         return tuple(
-            TelegramDestination(name, chat_id, bot_token, bool(is_default))
-            for name, chat_id, bot_token, is_default in rows
+            TelegramDestination(
+                name, chat_id, bot_token, bool(is_default), destination_type, sort_order
+            )
+            for name, chat_id, bot_token, is_default, destination_type, sort_order in rows
         )
 
     def telegram_destination(self, chat_id: str | None = None) -> TelegramDestination:
@@ -230,7 +276,7 @@ class Storage:
             if chat_id:
                 row = self.connection.execute(
                     """
-                    SELECT name, chat_id, bot_token, is_default
+                    SELECT name, chat_id, bot_token, is_default, destination_type, sort_order
                     FROM telegram_destinations WHERE chat_id = ?
                     """,
                     (chat_id,),
@@ -238,12 +284,73 @@ class Storage:
             else:
                 row = self.connection.execute(
                     """
-                    SELECT name, chat_id, bot_token, is_default
+                    SELECT name, chat_id, bot_token, is_default, destination_type, sort_order
                     FROM telegram_destinations
-                    ORDER BY is_default DESC, created_at
+                    ORDER BY sort_order, is_default DESC, created_at
                     LIMIT 1
                     """
                 ).fetchone()
         if not row:
             raise ValueError("Выбран неизвестный Telegram-канал")
-        return TelegramDestination(row[0], row[1], row[2], bool(row[3]))
+        return TelegramDestination(row[0], row[1], row[2], bool(row[3]), row[4], row[5])
+
+    def move_telegram_destination(self, chat_id: str, direction: int) -> None:
+        destinations = list(self.telegram_destinations())
+        index = next(
+            (position for position, item in enumerate(destinations) if item.chat_id == chat_id),
+            None,
+        )
+        if index is None:
+            raise ValueError("Telegram-направление не найдено")
+        target = index + direction
+        if target < 0 or target >= len(destinations):
+            return
+        destinations[index], destinations[target] = destinations[target], destinations[index]
+        with self.lock:
+            self.connection.executemany(
+                "UPDATE telegram_destinations SET sort_order = ? WHERE chat_id = ?",
+                [(position, item.chat_id) for position, item in enumerate(destinations)],
+            )
+            self.connection.commit()
+
+    def add_monitored_tiktok_channel(self, channel: str) -> None:
+        with self.lock:
+            self.connection.execute(
+                "INSERT OR IGNORE INTO monitored_tiktok_channels(channel) VALUES (?)",
+                (channel,),
+            )
+            self.connection.commit()
+
+    def delete_monitored_tiktok_channel(self, channel: str) -> None:
+        with self.lock:
+            self.connection.execute(
+                "DELETE FROM monitored_tiktok_channels WHERE channel = ?", (channel,)
+            )
+            self.connection.commit()
+
+    def monitored_tiktok_channels(self) -> tuple[str, ...]:
+        with self.lock:
+            rows = self.connection.execute(
+                "SELECT channel FROM monitored_tiktok_channels ORDER BY created_at, channel"
+            ).fetchall()
+        return tuple(row[0] for row in rows)
+
+    def setting(self, key: str, default: str) -> str:
+        with self.lock:
+            row = self.connection.execute(
+                "SELECT value FROM app_settings WHERE key = ?", (key,)
+            ).fetchone()
+        return row[0] if row else default
+
+    def set_setting(self, key: str, value: str, *, only_if_missing: bool = False) -> None:
+        query = (
+            "INSERT OR IGNORE INTO app_settings(key, value) VALUES (?, ?)"
+            if only_if_missing
+            else """
+            INSERT INTO app_settings(key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """
+        )
+        with self.lock:
+            self.connection.execute(query, (key, value))
+            self.connection.commit()
