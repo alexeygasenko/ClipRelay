@@ -55,6 +55,13 @@ body::before {
 .ambient-three { bottom: -10rem; left: 34%; background: linear-gradient(145deg, #29e0c0, #4d8eff); transform: rotate(45deg); }
 
 .shell { width: min(1320px, calc(100% - 32px)); margin: 0 auto; padding: 34px 0; }
+.source-selecting .shell {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: 0;
+}
+.source-selecting .shell > header { display: none; }
 header { max-width: 760px; margin-bottom: 22px; }
 .eyebrow {
   display: inline-flex;
@@ -224,24 +231,58 @@ video { width: 100%; max-height: 650px; border-radius: 26px; background: rgba(0,
 .actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
 .done { text-align: center; }
 
-.source-tabs, .mode-tabs { display: flex; gap: 8px; margin-bottom: 14px; }
+.source-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(150px, 190px));
+  justify-content: center;
+  align-items: center;
+  gap: 18px;
+  min-height: max(360px, calc(100vh - 290px));
+}
+.source-selecting .source-tabs {
+  width: min(680px, 100%);
+  min-height: auto;
+  margin: 0;
+}
+.mode-tabs { display: flex; gap: 8px; margin-bottom: 14px; }
 .source-tab, .mode-tab { flex: 1; background: rgba(224, 236, 255, .08); }
 .source-tab {
-  gap: 9px;
-  min-height: 58px;
-  align-items: center;
-  line-height: 1;
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 14px;
+  min-height: 174px;
+  padding: 24px 18px;
+  border-radius: 28px;
+  font-size: 18px;
+  line-height: 1.1;
 }
 .source-tab.active, .mode-tab.active { background: linear-gradient(135deg, rgba(138, 126, 255, .56), rgba(78, 211, 255, .4)); }
+.source-tabs.selected {
+  grid-template-columns: repeat(3, minmax(120px, 1fr));
+  min-height: auto;
+  margin-bottom: 14px;
+}
+.source-tabs.selected .source-tab {
+  min-height: 86px;
+  grid-auto-flow: column;
+  grid-auto-columns: max-content;
+  gap: 10px;
+  padding: 14px 18px;
+  border-radius: 18px;
+  font-size: 16px;
+}
 .source-logo {
   display: grid;
   place-items: center;
-  width: 26px;
-  height: 26px;
-  flex: 0 0 26px;
-  border-radius: 9px;
+  width: 64px;
+  height: 64px;
+  flex: 0 0 64px;
+  border-radius: 20px;
 }
-.source-logo svg { width: 21px; height: 21px; fill: currentColor; }
+.source-logo svg { width: 54px; height: 54px; fill: currentColor; }
+.source-tabs.selected .source-logo { width: 34px; height: 34px; flex-basis: 34px; border-radius: 12px; }
+.source-tabs.selected .source-logo svg { width: 28px; height: 28px; }
 .source-logo.instagram-logo svg {
   fill: none;
   stroke: currentColor;
@@ -251,9 +292,8 @@ video { width: 100%; max-height: 650px; border-radius: 26px; background: rgba(0,
 .tiktok-logo { color: #62f8ff; filter: drop-shadow(2px 2px 0 rgba(254, 44, 85, .7)); }
 .instagram-logo { color: #ffd36e; }
 .youtube-logo { color: #ff4b61; }
-.source-panel, .source-empty { max-width: 940px; min-height: 390px; animation: editor-enter .38s ease both; }
+.source-panel { max-width: 940px; min-height: 390px; animation: editor-enter .38s ease both; }
 .source-panel[hidden], [data-tiktok-panel][hidden] { display: none; }
-.source-empty[hidden] { display: none; }
 .service-card { min-height: 370px; }
 .service-heading { display: flex; gap: 14px; align-items: center; margin-bottom: 18px; }
 .service-heading h2, .youtube-meta h3 { margin: 0; line-height: 1.2; }
@@ -451,17 +491,30 @@ video { width: 100%; max-height: 650px; border-radius: 26px; background: rgba(0,
 .channel-controls, .channel-controls form { display: flex; gap: 5px; align-items: center; }
 .settings-section .channel-controls form + form { margin-top: 0; }
 .saved-channel .channel-delete, .saved-channel .channel-order {
-  display: grid;
+  display: inline-grid;
   place-items: center;
   width: 34px;
   height: 34px;
+  aspect-ratio: 1;
+  flex: 0 0 34px;
   min-height: 0;
+  max-height: 34px;
   padding: 0;
   line-height: 1;
-  font-size: 20px;
   border-radius: 999px;
+  overflow: hidden;
 }
-.saved-channel .channel-order { width: 30px; font-size: 15px; }
+.saved-channel .channel-order { width: 34px; }
+.saved-channel .channel-delete::before, .saved-channel .channel-order::before { inset: 0; border-radius: inherit; }
+.saved-channel .channel-delete svg, .saved-channel .channel-order svg {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 15px;
+  height: 15px;
+  fill: currentColor;
+}
+.saved-channel .channel-delete svg { width: 16px; height: 16px; }
 .settings-section {
   padding: 0 15px 15px;
   border: 1px solid var(--line-soft);
@@ -556,6 +609,7 @@ video { width: 100%; max-height: 650px; border-radius: 26px; background: rgba(0,
 @media (max-width: 760px) {
   .shell { padding: 36px 0; }
   .editor, .home-grid, .media-result { grid-template-columns: 1fr; }
+  .source-tabs, .source-tabs.selected { grid-template-columns: 1fr; min-height: auto; }
   video { max-height: 60vh; }
   .download-actions, .result-grid, .settings-grid { display: grid; grid-template-columns: 1fr; }
   .actions { display: grid; }
