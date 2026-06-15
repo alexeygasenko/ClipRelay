@@ -12,7 +12,7 @@
       <span data-channel-label>{{ selected.channel.name }}</span>
       <small data-channel-tag>{{ selected.channel.chat_id }}</small>
     </span>
-    <span class="channel-picker-chevron">⌄</span>
+    <span class="channel-picker-chevron" aria-hidden="true"></span>
   </button>
   <div class="channel-picker-menu" data-channel-menu hidden>
     {% for channel in channels %}
