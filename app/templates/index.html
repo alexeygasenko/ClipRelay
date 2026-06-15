@@ -67,8 +67,17 @@
   </section>
 </div>
 
-<details class="card settings-card" {% if settings_open %}open{% endif %}>
-  <summary>Настройки Telegram и cookies</summary>
+<button class="settings-toggle" type="button" data-settings-open aria-label="Открыть настройки">
+  <span></span><span></span><span></span>
+</button>
+<div class="settings-overlay" data-settings-close></div>
+<aside class="settings-drawer {% if settings_open or request.args.get('settings') %}open{% endif %}" aria-label="Настройки">
+  <div class="settings-drawer-heading">
+    <div>
+      <span class="eyebrow">Настройки</span>
+      <h2>Telegram и cookies</h2>
+    </div>
+  </div>
   {% if settings_error %}<div class="error settings-error">{{ settings_error }}</div>{% endif %}
   {% if request.args.get("settings") %}<div class="settings-success">Настройки обновлены.</div>{% endif %}
   <div class="settings-grid">
@@ -105,7 +114,7 @@
       </form>
     </div>
   </div>
-</details>
+</aside>
 
 <div id="page-transition" class="page-transition" aria-live="polite" hidden>
   <div class="transition-orb">
@@ -123,7 +132,19 @@
   const youtubeInput = document.getElementById("youtube_url");
   const youtubeStatus = document.getElementById("youtube-status");
   const youtubeResult = document.getElementById("youtube-result");
+  const settingsDrawer = document.querySelector(".settings-drawer");
   let youtubeTimer;
+
+  function setSettingsOpen(open) {
+    settingsDrawer.classList.toggle("open", open);
+    document.body.classList.toggle("settings-open", open);
+  }
+  document.querySelector("[data-settings-open]").addEventListener("click", () => setSettingsOpen(!settingsDrawer.classList.contains("open")));
+  document.querySelectorAll("[data-settings-close]").forEach((item) => item.addEventListener("click", () => setSettingsOpen(false)));
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") setSettingsOpen(false);
+  });
+  setSettingsOpen(settingsDrawer.classList.contains("open"));
 
   async function inspectYouTube() {
     const url = youtubeInput.value.trim();
