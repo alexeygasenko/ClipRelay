@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from app.config import Config
+from app.config import Config, TelegramChannel
 from app.service import Video, YouTubeVideo
 from app.web import create_app
 
@@ -21,16 +21,27 @@ class FakeService:
         return Video("123", "author", "Исходный текст", url, 0), self.path
 
     def publish(
-        self, video: Video, path: Path, quote_text: str, before_text: str, after_text: str
+        self,
+        video: Video,
+        path: Path,
+        quote_text: str,
+        before_text: str,
+        after_text: str,
+        chat_id: str,
     ) -> None:
-        self.published = (video, path, quote_text, before_text, after_text)
+        self.published = (video, path, quote_text, before_text, after_text, chat_id)
 
-    def import_channel(self, url: str, post_existing: bool):
-        self.imported = (url, post_existing)
+    def import_channel(self, url: str, post_existing: bool, chat_id: str):
+        self.imported = (url, post_existing, chat_id)
         return 15, 4 if post_existing else 0
 
     def get_youtube_info(self, url: str) -> YouTubeVideo:
         return YouTubeVideo("yt1", "YouTube title", url, "https://i.ytimg.com/test.jpg", 60, "Channel")
+
+    def publish_youtube(
+        self, video: YouTubeVideo, before_text: str, after_text: str, chat_id: str
+    ) -> None:
+        self.published_youtube = (video, before_text, after_text, chat_id)
 
 
 def make_config(tmp_path: Path) -> Config:
@@ -49,6 +60,10 @@ def make_config(tmp_path: Path) -> Config:
         web_port=8080,
         web_username=None,
         web_password=None,
+        telegram_channels=(
+            TelegramChannel("Main", "@channel"),
+            TelegramChannel("Second", "@second"),
+        ),
     )
 
 
@@ -75,7 +90,12 @@ def test_web_flow_uses_caption_builder_texts(tmp_path: Path) -> None:
         },
     )
     assert response.status_code == 302
-    assert service.published[2:] == ("Новая цитата", "До цитаты", "После цитаты")
+    assert service.published[2:] == (
+        "Новая цитата",
+        "До цитаты",
+        "После цитаты",
+        "@channel",
+    )
     assert not path.exists()
 
 
@@ -107,11 +127,15 @@ def test_tiktok_channel_can_publish_existing(tmp_path: Path) -> None:
 
     response = client.post(
         "/tiktok/prepare",
-        data={"tiktok_url": "https://www.tiktok.com/@author", "post_existing": "on"},
+        data={
+            "tiktok_url": "https://www.tiktok.com/@author",
+            "post_existing": "on",
+            "chat_id": "@second",
+        },
     )
 
     assert response.status_code == 200
-    assert service.imported == ("https://www.tiktok.com/@author", True)
+    assert service.imported == ("https://www.tiktok.com/@author", True, "@second")
     assert "4" in response.text
 
 
@@ -127,6 +151,7 @@ def test_youtube_info_returns_download_links(tmp_path: Path) -> None:
     assert payload["title"] == "YouTube title"
     assert "/youtube/thumbnail/" in payload["thumbnail_download_url"]
     assert "/youtube/video/" in payload["video_download_url"]
+    assert "/youtube/post/" in payload["post_url"]
 
 
 def test_home_has_post_builder_transition(tmp_path: Path) -> None:
@@ -139,3 +164,24 @@ def test_home_has_post_builder_transition(tmp_path: Path) -> None:
     assert 'id="page-transition"' in response.text
     assert 'name="tiktok_url"' in response.text
     assert 'autocomplete="off"' in response.text
+    assert "Second" in response.text
+
+
+def test_youtube_post_can_be_prepared_and_sent(tmp_path: Path) -> None:
+    service = FakeService(tmp_path / "video.mp4")
+    client = create_app(make_config(tmp_path), service).test_client()
+    info = client.post(
+        "/youtube/info", data={"youtube_url": "https://www.youtube.com/watch?v=abc"}
+    ).get_json()
+
+    response = client.get(info["post_url"])
+    assert response.status_code == 200
+    assert "Подготовьте YouTube-пост" in response.text
+    job_id = info["post_url"].rsplit("/", 1)[-1]
+
+    response = client.post(
+        f"/youtube/send/{job_id}",
+        data={"before_text": "До", "after_text": "После", "chat_id": "@second"},
+    )
+    assert response.status_code == 302
+    assert service.published_youtube[1:] == ("До", "После", "@second")

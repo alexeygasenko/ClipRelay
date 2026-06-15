@@ -168,6 +168,41 @@ def build_caption(
     return render([text[:low] for text in texts], truncated=True)
 
 
+def build_youtube_caption(
+    video: YouTubeVideo, before_text: str = "", after_text: str = ""
+) -> str:
+    video_url = html.escape(video.url, quote=True)
+    texts = [before_text.strip(), video.title.strip(), video.channel.strip(), after_text.strip()]
+
+    def render(parts: list[str], truncated: bool = False) -> str:
+        before, title, channel, after = (
+            html.escape(part) + ("…" if truncated and part else "") for part in parts
+        )
+        sections: list[str] = []
+        if before:
+            sections.append(before)
+        sections.append(f'<a href="{video_url}">{title or "Смотреть на YouTube"}</a>')
+        if channel:
+            sections.append(channel)
+        if after:
+            sections.append(after)
+        return "\n\n".join(sections)
+
+    caption = render(texts)
+    if len(caption) <= MAX_CAPTION_LENGTH:
+        return caption
+
+    low, high = 0, max(len(text) for text in texts)
+    while low < high:
+        middle = (low + high + 1) // 2
+        candidate = render([text[:middle] for text in texts], truncated=True)
+        if len(candidate) <= MAX_CAPTION_LENGTH:
+            low = middle
+        else:
+            high = middle - 1
+    return render([text[:low] for text in texts], truncated=True)
+
+
 class TikTokToTelegram:
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -405,8 +440,11 @@ class TikTokToTelegram:
             raise FileNotFoundError("Скачанное YouTube-видео не найдено")
         return max(matches, key=lambda path: path.stat().st_size)
 
-    def import_channel(self, channel: str, post_existing: bool) -> tuple[int, int]:
+    def import_channel(
+        self, channel: str, post_existing: bool, chat_id: str | None = None
+    ) -> tuple[int, int]:
         username, _ = normalize_channel(channel)
+        destination = self.config.validate_telegram_chat_id(chat_id)
         videos = self.scan(channel)
         if not post_existing:
             for video in videos:
@@ -421,7 +459,7 @@ class TikTokToTelegram:
             path: Path | None = None
             try:
                 path = self.download(video)
-                self.publish(video, path)
+                self.publish(video, path, chat_id=destination)
                 self.storage.mark(video.video_id, username)
                 published += 1
             finally:
@@ -437,13 +475,15 @@ class TikTokToTelegram:
         quote_text: str | None = None,
         before_text: str = "",
         after_text: str = "",
+        chat_id: str | None = None,
     ) -> None:
+        destination = self.config.validate_telegram_chat_id(chat_id)
         url = f"https://api.telegram.org/bot{self.config.telegram_bot_token}/sendVideo"
         with path.open("rb") as video_file:
             response = requests.post(
                 url,
                 data={
-                    "chat_id": self.config.telegram_chat_id,
+                    "chat_id": destination,
                     "caption": build_caption(video, quote_text, before_text, after_text),
                     "parse_mode": "HTML",
                     "supports_streaming": "true",
@@ -451,6 +491,30 @@ class TikTokToTelegram:
                 files={"video": (path.name, video_file, "video/mp4")},
                 timeout=180,
             )
+        response.raise_for_status()
+        payload = response.json()
+        if not payload.get("ok"):
+            raise RuntimeError(f"Telegram API error: {payload}")
+
+    def publish_youtube(
+        self,
+        video: YouTubeVideo,
+        before_text: str = "",
+        after_text: str = "",
+        chat_id: str | None = None,
+    ) -> None:
+        destination = self.config.validate_telegram_chat_id(chat_id)
+        url = f"https://api.telegram.org/bot{self.config.telegram_bot_token}/sendPhoto"
+        response = requests.post(
+            url,
+            data={
+                "chat_id": destination,
+                "photo": video.thumbnail_url,
+                "caption": build_youtube_caption(video, before_text, after_text),
+                "parse_mode": "HTML",
+            },
+            timeout=60,
+        )
         response.raise_for_status()
         payload = response.json()
         if not payload.get("ok"):

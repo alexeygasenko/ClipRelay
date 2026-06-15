@@ -13,7 +13,7 @@ import requests
 from flask import Flask, Response, abort, jsonify, redirect, render_template, request, send_file, url_for
 from werkzeug.utils import secure_filename
 
-from app.config import Config
+from app.config import Config, TelegramChannel
 from app.service import TikTokToTelegram, Video, YouTubeVideo, is_tiktok_video_url
 
 LOGGER = logging.getLogger(__name__)
@@ -26,6 +26,7 @@ class PreparedJob:
     video: Video
     path: Path
     created_at: float
+    selected_chat_id: str
 
 
 @dataclass
@@ -41,8 +42,8 @@ class JobStore:
         self.jobs: dict[str, PreparedJob] = {}
         self.lock = threading.Lock()
 
-    def add(self, video: Video, path: Path) -> PreparedJob:
-        job = PreparedJob(uuid.uuid4().hex, video, path, time.time())
+    def add(self, video: Video, path: Path, selected_chat_id: str) -> PreparedJob:
+        job = PreparedJob(uuid.uuid4().hex, video, path, time.time(), selected_chat_id)
         with self.lock:
             self._cleanup()
             self.jobs[job.job_id] = job
@@ -98,6 +99,12 @@ class YouTubeJobStore:
         with self.lock:
             self.jobs[job_id].path = path
 
+    def remove(self, job_id: str) -> None:
+        with self.lock:
+            job = self.jobs.pop(job_id, None)
+        if job and job.path and job.path.exists():
+            job.path.unlink()
+
     def _cleanup(self) -> None:
         expired = [
             job_id
@@ -114,6 +121,9 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
     app = Flask(__name__)
     jobs = JobStore()
     youtube_jobs = YouTubeJobStore()
+    telegram_channels = config.telegram_channels or (
+        TelegramChannel(config.telegram_chat_id, config.telegram_chat_id),
+    )
 
     @app.before_request
     def require_auth() -> Response | None:
@@ -135,19 +145,25 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
 
     @app.get("/")
     def index() -> str:
-        return render_template("index.html")
+        return render_template("index.html", telegram_channels=telegram_channels)
 
     @app.post("/prepare")
     @app.post("/tiktok/prepare")
     def prepare():
         tiktok_url = request.form.get("tiktok_url", "").strip()
+        selected_chat_id = request.form.get("chat_id", "")
         try:
+            selected_chat_id = config.validate_telegram_chat_id(selected_chat_id)
             if is_tiktok_video_url(tiktok_url):
                 video, path = service.prepare_url(tiktok_url)
-                job = jobs.add(video, path)
-                return render_template("edit.html", job=job)
+                job = jobs.add(video, path, selected_chat_id)
+                return render_template(
+                    "edit.html", job=job, telegram_channels=telegram_channels
+                )
             post_existing = request.form.get("post_existing") == "on"
-            found, published = service.import_channel(tiktok_url, post_existing)
+            found, published = service.import_channel(
+                tiktok_url, post_existing, selected_chat_id
+            )
             return render_template(
                 "channel_result.html",
                 channel=tiktok_url,
@@ -157,7 +173,13 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
             )
         except Exception as error:
             LOGGER.exception("Failed to prepare URL %s", tiktok_url)
-            return render_template("index.html", error=str(error), tiktok_url=tiktok_url), 400
+            return render_template(
+                "index.html",
+                error=str(error),
+                tiktok_url=tiktok_url,
+                telegram_channels=telegram_channels,
+                selected_chat_id=selected_chat_id,
+            ), 400
 
     @app.post("/youtube/info")
     def youtube_info():
@@ -174,6 +196,7 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
                     "thumbnail_url": video.thumbnail_url,
                     "thumbnail_download_url": url_for("youtube_thumbnail", job_id=job.job_id),
                     "video_download_url": url_for("youtube_video", job_id=job.job_id),
+                    "post_url": url_for("youtube_post", job_id=job.job_id),
                 }
             )
         except Exception as error:
@@ -210,6 +233,37 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
             conditional=True,
         )
 
+    @app.get("/youtube/post/<job_id>")
+    def youtube_post(job_id: str):
+        job = youtube_jobs.get(job_id)
+        return render_template(
+            "youtube_edit.html", job=job, telegram_channels=telegram_channels
+        )
+
+    @app.post("/youtube/send/<job_id>")
+    def youtube_send(job_id: str):
+        job = youtube_jobs.get(job_id)
+        before_text = request.form.get("before_text", "")
+        after_text = request.form.get("after_text", "")
+        selected_chat_id = request.form.get("chat_id", "")
+        try:
+            service.publish_youtube(
+                job.video, before_text, after_text, selected_chat_id
+            )
+            youtube_jobs.remove(job_id)
+            return redirect(url_for("done", source="youtube"))
+        except Exception as error:
+            LOGGER.exception("Failed to publish YouTube job %s", job_id)
+            return render_template(
+                "youtube_edit.html",
+                job=job,
+                telegram_channels=telegram_channels,
+                selected_chat_id=selected_chat_id,
+                before_text=before_text,
+                after_text=after_text,
+                error=str(error),
+            ), 502
+
     @app.get("/preview/<job_id>")
     def preview(job_id: str):
         job = jobs.get(job_id)
@@ -221,8 +275,16 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
         before_text = request.form.get("before_text", "")
         quote_text = request.form.get("quote_text", "")
         after_text = request.form.get("after_text", "")
+        selected_chat_id = request.form.get("chat_id", job.selected_chat_id)
         try:
-            service.publish(job.video, job.path, quote_text, before_text, after_text)
+            service.publish(
+                job.video,
+                job.path,
+                quote_text,
+                before_text,
+                after_text,
+                selected_chat_id,
+            )
             service.storage.mark(job.video.video_id, job.video.username)
             jobs.remove(job_id)
             return redirect(url_for("done"))
@@ -234,6 +296,8 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
                 before_text=before_text,
                 quote_text=quote_text,
                 after_text=after_text,
+                selected_chat_id=selected_chat_id,
+                telegram_channels=telegram_channels,
                 error=str(error),
             ), 502
 
@@ -244,6 +308,6 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
 
     @app.get("/done")
     def done() -> str:
-        return render_template("done.html")
+        return render_template("done.html", source=request.args.get("source", "tiktok"))
 
     return app

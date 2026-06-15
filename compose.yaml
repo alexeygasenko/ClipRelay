@@ -8,7 +8,7 @@ services:
     ports:
       - "127.0.0.1:6767:8080"
     volumes:
-      - tiktok-data:/data
+      - ./data:/config/data
       - ./config.yaml:/config/config.yaml:ro
       - ./tiktok-cookies.txt:/config/tiktok-cookies.txt:ro
       - ./youtube-cookies.txt:/config/youtube-cookies.txt:ro
@@ -16,6 +16,3 @@ services:
   bgutil-provider:
     image: brainicism/bgutil-ytdlp-pot-provider:1.3.1
     restart: unless-stopped
-
-volumes:
-  tiktok-data:

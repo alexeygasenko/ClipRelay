@@ -20,6 +20,12 @@
         value="{{ tiktok_url or '' }}"
         required
       >
+      <label for="tiktok_chat_id">Telegram-канал</label>
+      <select id="tiktok_chat_id" name="chat_id" autocomplete="off">
+        {% for channel in telegram_channels %}
+        <option value="{{ channel.chat_id }}" {% if selected_chat_id is defined and selected_chat_id == channel.chat_id %}selected{% endif %}>{{ channel.name }}</option>
+        {% endfor %}
+      </select>
       <label class="check-row">
         <input type="checkbox" name="post_existing" autocomplete="off">
         <span>
@@ -37,7 +43,7 @@
       <span class="service-mark youtube-mark">YT</span>
       <div>
         <h2>YouTube Downloader</h2>
-        <p>Видео и превью в максимальном качестве</p>
+        <p>Видео, превью и Telegram-посты</p>
       </div>
     </div>
     <label for="youtube_url">Ссылка на YouTube-видео</label>
@@ -55,7 +61,8 @@
         <p id="youtube-channel"></p>
         <div class="download-actions">
           <a id="youtube-thumbnail-download" class="secondary" href="#">Скачать превью</a>
-          <a id="youtube-video-download" class="button" href="#">Скачать видео</a>
+          <a id="youtube-video-download" class="secondary" href="#">Скачать видео</a>
+          <a id="youtube-post" class="button" href="#">Подготовить пост</a>
         </div>
         <p class="hint">Подготовка видео в полном качестве начнётся после нажатия и может занять несколько минут.</p>
       </div>
@@ -100,6 +107,7 @@
       document.getElementById("youtube-channel").textContent = data.channel;
       document.getElementById("youtube-thumbnail-download").href = data.thumbnail_download_url;
       document.getElementById("youtube-video-download").href = data.video_download_url;
+      document.getElementById("youtube-post").href = data.post_url;
       youtubeStatus.textContent = "";
       youtubeResult.hidden = false;
     } catch (error) {

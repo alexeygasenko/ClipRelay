@@ -1,10 +1,12 @@
 import pytest
 
-from app.config import Config
+from app.config import Config, TelegramChannel
 from app.service import (
     TikTokToTelegram,
     Video,
+    YouTubeVideo,
     best_thumbnail_url,
+    build_youtube_caption,
     has_youtube_auth_cookies,
     build_caption,
     normalize_channel,
@@ -65,6 +67,25 @@ def test_caption_truncates_all_builder_sections() -> None:
     )
     assert len(caption) <= 1024
     assert "<blockquote>" in caption
+
+
+def test_youtube_caption_contains_link_and_custom_text() -> None:
+    caption = build_youtube_caption(
+        YouTubeVideo(
+            "yt1",
+            "Video <title>",
+            "https://youtube.com/watch?v=yt1",
+            "https://i.ytimg.com/yt1.jpg",
+            60,
+            "Channel & Co",
+        ),
+        "Before",
+        "After",
+    )
+    assert "Before" in caption
+    assert '<a href="https://youtube.com/watch?v=yt1">Video &lt;title&gt;</a>' in caption
+    assert "Channel &amp; Co" in caption
+    assert "After" in caption
 
 
 def test_manual_url_must_be_tiktok() -> None:
@@ -135,3 +156,56 @@ def test_detects_youtube_auth_cookies(tmp_path) -> None:
         encoding="utf-8",
     )
     assert has_youtube_auth_cookies(cookies)
+
+
+def test_publish_youtube_sends_photo_to_selected_channel(tmp_path, monkeypatch) -> None:
+    config = Config(
+        telegram_bot_token="token",
+        telegram_chat_id="@main",
+        tiktok_channels=(),
+        poll_interval_seconds=300,
+        scan_limit=15,
+        post_existing=False,
+        data_dir=tmp_path,
+        cookies_file=None,
+        youtube_cookies_file=None,
+        youtube_po_token_provider_url=None,
+        web_host="127.0.0.1",
+        web_port=8080,
+        web_username=None,
+        web_password=None,
+        telegram_channels=(
+            TelegramChannel("Main", "@main"),
+            TelegramChannel("Second", "@second"),
+        ),
+    )
+    captured = {}
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"ok": True}
+
+    def fake_post(url, data, timeout):
+        captured.update(url=url, data=data, timeout=timeout)
+        return Response()
+
+    monkeypatch.setattr("app.service.requests.post", fake_post)
+    service = TikTokToTelegram(config)
+    video = YouTubeVideo(
+        "yt1",
+        "Title",
+        "https://youtube.com/watch?v=yt1",
+        "https://i.ytimg.com/yt1.jpg",
+        60,
+        "Channel",
+    )
+
+    service.publish_youtube(video, "Before", "After", "@second")
+
+    assert captured["url"].endswith("/sendPhoto")
+    assert captured["data"]["chat_id"] == "@second"
+    assert captured["data"]["photo"] == video.thumbnail_url
+    assert video.url in captured["data"]["caption"]

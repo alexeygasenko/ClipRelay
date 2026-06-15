@@ -14,6 +14,12 @@
         @{{ job.video.username }}
       </a>
     </div>
+    <label for="chat_id">Опубликовать в Telegram-канал</label>
+    <select id="chat_id" name="chat_id" autocomplete="off">
+      {% for channel in telegram_channels %}
+      <option value="{{ channel.chat_id }}" {% if (selected_chat_id if selected_chat_id is defined else job.selected_chat_id) == channel.chat_id %}selected{% endif %}>{{ channel.name }}</option>
+      {% endfor %}
+    </select>
     <div class="caption-builder">
       <label for="before_text">Текст до цитаты</label>
       <textarea id="before_text" name="before_text" rows="3" maxlength="3000" autocomplete="off" placeholder="Необязательный обычный текст">{{ before_text if before_text is defined else "" }}</textarea>

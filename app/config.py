@@ -42,6 +42,30 @@ def _config_path(value: str, config_file: Path) -> Path | None:
 
 
 @dataclass(frozen=True)
+class TelegramChannel:
+    name: str
+    chat_id: str
+
+
+def _telegram_channels(value: Any, default_chat_id: str) -> tuple[TelegramChannel, ...]:
+    result: list[TelegramChannel] = []
+    if isinstance(value, str):
+        value = value.split(",")
+    for item in value or []:
+        if isinstance(item, dict):
+            chat_id = str(item.get("chat_id") or "").strip()
+            name = str(item.get("name") or chat_id).strip()
+        else:
+            chat_id = str(item).strip()
+            name = chat_id
+        if chat_id and chat_id not in {channel.chat_id for channel in result}:
+            result.append(TelegramChannel(name or chat_id, chat_id))
+    if default_chat_id and default_chat_id not in {channel.chat_id for channel in result}:
+        result.insert(0, TelegramChannel(default_chat_id, default_chat_id))
+    return tuple(result)
+
+
+@dataclass(frozen=True)
 class Config:
     telegram_bot_token: str
     telegram_chat_id: str
@@ -57,6 +81,16 @@ class Config:
     web_port: int
     web_username: str | None
     web_password: str | None
+    telegram_channels: tuple[TelegramChannel, ...] = ()
+
+    def validate_telegram_chat_id(self, chat_id: str | None) -> str:
+        selected = (chat_id or self.telegram_chat_id).strip()
+        allowed = {channel.chat_id for channel in self.telegram_channels} or {
+            self.telegram_chat_id
+        }
+        if selected not in allowed:
+            raise ValueError("Выбран неизвестный Telegram-канал")
+        return selected
 
     @classmethod
     def from_sources(cls) -> "Config":
@@ -108,7 +142,10 @@ class Config:
             post_existing=_as_bool(
                 _value(data, "POST_EXISTING", "tiktok.post_existing", False)
             ),
-            data_dir=Path(str(_value(data, "DATA_DIR", "data_dir", "/data"))),
+            data_dir=_config_path(
+                str(_value(data, "DATA_DIR", "data_dir", "data")), config_file
+            )
+            or config_file.parent / "data",
             cookies_file=_config_path(cookies, config_file),
             youtube_cookies_file=_config_path(youtube_cookies, config_file),
             youtube_po_token_provider_url=youtube_po_token_provider_url or None,
@@ -116,4 +153,7 @@ class Config:
             web_port=int(_value(data, "WEB_PORT", "web.port", 8080)),
             web_username=web_username or None,
             web_password=web_password or None,
+            telegram_channels=_telegram_channels(
+                _value(data, "TELEGRAM_CHANNELS", "telegram.channels", []), chat_id
+            ),
         )

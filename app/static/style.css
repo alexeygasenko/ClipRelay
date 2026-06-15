@@ -120,7 +120,7 @@ h1 {
 .card > * { position: relative; }
 
 label { display: block; margin-bottom: 8px; color: #f2f5ff; font-weight: 600; }
-input, textarea {
+input, textarea, select {
   width: 100%;
   border: 1px solid var(--line-soft);
   border-radius: 15px;
@@ -132,14 +132,16 @@ input, textarea {
   backdrop-filter: blur(22px) saturate(150%);
   transition: border-color .2s, box-shadow .2s, background .2s;
 }
-input { padding: 15px 16px; margin-bottom: 16px; }
+input, select { padding: 15px 16px; margin-bottom: 16px; }
 textarea { min-height: 230px; padding: 14px; resize: vertical; }
 input::placeholder, textarea::placeholder { color: rgba(220, 228, 255, .38); }
-input:focus, textarea:focus {
+input:focus, textarea:focus, select:focus {
   border-color: rgba(113, 217, 255, .72);
   background: linear-gradient(145deg, rgba(255, 255, 255, .085), rgba(8, 12, 30, .22));
   box-shadow: 0 0 0 4px rgba(78, 220, 255, .09), inset 0 1px rgba(255, 255, 255, .16);
 }
+select { appearance: none; cursor: pointer; }
+select option { color: #f8faff; background: #151a31; }
 
 button, .button, .secondary {
   display: inline-flex;
@@ -252,8 +254,19 @@ video { width: 100%; max-height: 650px; border-radius: 26px; background: rgba(0,
 .youtube-result img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; }
 .youtube-meta { padding: 18px; }
 .youtube-meta h3 { font-size: 18px; }
-.download-actions { display: flex; gap: 10px; margin-top: 18px; }
+.download-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
 .download-actions > * { flex: 1; }
+.youtube-post-media {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 26px;
+  background: linear-gradient(145deg, rgba(255, 255, 255, .07), rgba(5, 8, 20, .18));
+  box-shadow: inset 0 1px rgba(255, 255, 255, .22), var(--shadow);
+  backdrop-filter: blur(34px) saturate(175%);
+}
+.youtube-post-media img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; }
+.youtube-post-media h2 { margin: 20px 22px 4px; font-size: 20px; line-height: 1.25; }
+.youtube-post-media p { margin: 0 22px 22px; color: var(--muted); }
 .result-grid { display: grid; grid-template-columns: 1fr 1fr auto; align-items: center; gap: 20px; }
 .result-grid div { display: grid; }
 .result-grid strong { font-size: 42px; line-height: 1; }

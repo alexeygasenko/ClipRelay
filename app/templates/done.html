@@ -1,9 +1,9 @@
 {% extends "base.html" %}
 {% block title %}Опубликовано{% endblock %}
-{% block heading %}Видео опубликовано{% endblock %}
-{% block lead %}Telegram принял видео и подпись.{% endblock %}
+{% block heading %}Пост опубликован{% endblock %}
+{% block lead %}{% if source == "youtube" %}Telegram принял ссылку, превью и текст публикации.{% else %}Telegram принял видео и подпись.{% endif %}{% endblock %}
 {% block content %}
 <div class="card done">
-  <a class="button" href="{{ url_for('index') }}">Подготовить следующее видео</a>
+  <a class="button" href="{{ url_for('index') }}">Подготовить следующий пост</a>
 </div>
 {% endblock %}

@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Подготовка YouTube-поста{% endblock %}
+{% block body_class %}editor-page{% endblock %}
+{% block eyebrow %}<a class="eyebrow back-link" href="{{ url_for('index') }}">← На главную</a>{% endblock %}
+{% block heading %}Подготовьте YouTube-пост{% endblock %}
+{% block lead %}В Telegram отправятся превью, ссылка на видео и подготовленный текст.{% endblock %}
+{% block content %}
+<section class="editor youtube-post-editor">
+  <div class="youtube-post-media">
+    <img src="{{ job.video.thumbnail_url }}" alt="Превью {{ job.video.title }}">
+    <h2>{{ job.video.title }}</h2>
+    <p>{{ job.video.channel }}</p>
+  </div>
+  <form class="card" action="{{ url_for('youtube_send', job_id=job.job_id) }}" method="post" autocomplete="off">
+    <label for="chat_id">Опубликовать в Telegram-канал</label>
+    <select id="chat_id" name="chat_id" autocomplete="off">
+      {% for channel in telegram_channels %}
+      <option value="{{ channel.chat_id }}" {% if selected_chat_id is defined and selected_chat_id == channel.chat_id %}selected{% endif %}>{{ channel.name }}</option>
+      {% endfor %}
+    </select>
+
+    <div class="caption-builder">
+      <label for="before_text">Текст до ссылки</label>
+      <textarea id="before_text" name="before_text" rows="5" maxlength="3000" autocomplete="off" placeholder="Необязательный текст">{{ before_text if before_text is defined else "" }}</textarea>
+
+      <label for="after_text">Текст после ссылки</label>
+      <textarea id="after_text" name="after_text" rows="5" maxlength="3000" autocomplete="off" placeholder="Необязательный текст">{{ after_text if after_text is defined else "" }}</textarea>
+    </div>
+
+    <div class="caption-preview">
+      <strong>Предпросмотр подписи</strong>
+      <div id="caption-preview-content">
+        <p id="preview-before"></p>
+        <a href="{{ job.video.url }}" target="_blank" rel="noreferrer">{{ job.video.title }}</a>
+        <p>{{ job.video.channel }}</p>
+        <p id="preview-after"></p>
+      </div>
+    </div>
+
+    <div class="actions">
+      <a class="secondary" href="{{ url_for('index') }}">Отмена</a>
+      <button type="submit">Отправить в Telegram</button>
+    </div>
+  </form>
+</section>
+<script>
+  const fields = {
+    before: document.getElementById("before_text"),
+    after: document.getElementById("after_text"),
+  };
+  const previews = {
+    before: document.getElementById("preview-before"),
+    after: document.getElementById("preview-after"),
+  };
+  function updatePreview() {
+    for (const key of Object.keys(fields)) {
+      const value = fields[key].value.trim();
+      previews[key].textContent = value;
+      previews[key].hidden = !value;
+    }
+  }
+  Object.values(fields).forEach((field) => field.addEventListener("input", updatePreview));
+  updatePreview();
+</script>
+{% endblock %}

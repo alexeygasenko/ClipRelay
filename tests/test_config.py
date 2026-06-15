@@ -10,6 +10,11 @@ def test_loads_yaml(tmp_path: Path, monkeypatch) -> None:
 telegram:
   bot_token: secret-token
   chat_id: "@channel"
+  channels:
+    - name: Main
+      chat_id: "@channel"
+    - name: Second
+      chat_id: "@second"
 tiktok:
   channels: ["@one", "@two"]
   poll_interval_seconds: 120
@@ -26,9 +31,14 @@ web:
 
     assert config.telegram_bot_token == "secret-token"
     assert config.telegram_chat_id == "@channel"
+    assert [channel.chat_id for channel in config.telegram_channels] == [
+        "@channel",
+        "@second",
+    ]
     assert config.tiktok_channels == ("@one", "@two")
     assert config.poll_interval_seconds == 120
     assert config.web_port == 9000
+    assert config.data_dir == tmp_path / "data"
 
 
 def test_relative_cookie_paths_are_resolved_from_config(tmp_path: Path, monkeypatch) -> None:
@@ -69,3 +79,21 @@ def test_environment_overrides_yaml(tmp_path: Path, monkeypatch) -> None:
     assert config.telegram_bot_token == "env-token"
     assert config.telegram_chat_id == "@env"
     assert config.web_port == 9090
+
+
+def test_rejects_unknown_telegram_channel(tmp_path: Path, monkeypatch) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        "telegram:\n  bot_token: token\n  chat_id: '@main'\n  channels: ['@main', '@other']\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONFIG_FILE", str(config_file))
+    config = Config.from_sources()
+
+    assert config.validate_telegram_chat_id("@other") == "@other"
+    try:
+        config.validate_telegram_chat_id("@unknown")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Unknown Telegram channel must be rejected")
