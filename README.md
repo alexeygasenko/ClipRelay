@@ -3,7 +3,7 @@
 Docker service for relaying social video posts to Telegram.
 
 - Publishes individual TikTok videos to Telegram after caption editing.
-- Downloads Instagram videos and publishes them to Telegram after caption editing.
+- Downloads Instagram videos and image posts, including carousels, and publishes them to Telegram after caption editing.
 - Accepts TikTok channels and lets you publish or skip existing videos.
 - Automatically monitors configured TikTok channels.
 - Downloads YouTube videos and thumbnails in the best available quality.

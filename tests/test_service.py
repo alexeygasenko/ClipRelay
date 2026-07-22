@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,9 +11,12 @@ from app.service import (
     best_thumbnail_url,
     build_youtube_caption,
     has_youtube_auth_cookies,
+    instagram_image_post_from_media,
+    instagram_shortcode_to_media_id,
     build_caption,
     media_author_from_info,
     normalize_channel,
+    resolve_caption_html,
     username_from_info,
     validate_tiktok_url,
     validate_youtube_url,
@@ -52,6 +56,120 @@ def test_tiktok_image_post_urls_from_data() -> None:
         "https://p16-common-sign.tiktokcdn-us.com/tos/image-one.jpeg?x=1",
         "https://cdn.test/two.jpeg",
     ]
+
+
+def test_instagram_image_post_from_media_uses_best_carousel_images() -> None:
+    media = {
+        "code": "ABC_123",
+        "caption": {"text": "Summer"},
+        "taken_at": 123,
+        "user": {"username": "creator.name", "full_name": "Creator"},
+        "carousel_media": [
+            {
+                "media_type": 1,
+                "image_versions2": {
+                    "candidates": [
+                        {"url": "https://cdn.test/one-small.jpg", "width": 320, "height": 320},
+                        {"url": "https://cdn.test/one.jpg", "width": 1080, "height": 1080},
+                    ]
+                },
+            },
+            {
+                "media_type": 2,
+                "video_versions": [{"url": "https://cdn.test/video.mp4"}],
+                "image_versions2": {
+                    "candidates": [{"url": "https://cdn.test/video-cover.jpg"}]
+                },
+            },
+            {
+                "media_type": 1,
+                "image_versions2": {
+                    "candidates": [{"url": "https://cdn.test/two.jpg", "width": 1080, "height": 1350}]
+                },
+            },
+        ],
+    }
+
+    info, image_urls = instagram_image_post_from_media(
+        media, "https://www.instagram.com/p/ABC_123/"
+    )
+
+    assert info["id"] == "ABC_123"
+    assert info["description"] == "Summer"
+    assert info["channel"] == "creator.name"
+    assert info["uploader_url"] == "https://www.instagram.com/creator.name/"
+    assert image_urls == [
+        "https://cdn.test/one.jpg",
+        "https://cdn.test/two.jpg",
+    ]
+
+
+def test_instagram_shortcode_to_media_id() -> None:
+    assert instagram_shortcode_to_media_id("aye83DjauH") == 482584233761418119
+
+
+def test_instagram_image_info_uses_authenticated_media_api(tmp_path, monkeypatch) -> None:
+    config = Config(
+        telegram_bot_token="token",
+        telegram_chat_id="@main",
+        tiktok_channels=(),
+        poll_interval_seconds=300,
+        scan_limit=15,
+        post_existing=False,
+        data_dir=tmp_path,
+        cookies_file=None,
+        instagram_cookies_file=None,
+        youtube_cookies_file=None,
+        youtube_po_token_provider_url=None,
+        web_host="127.0.0.1",
+        web_port=8080,
+        web_username=None,
+        web_password=None,
+    )
+    service = TikTokToTelegram(config)
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "items": [
+                    {
+                        "code": "Da20blqmA_f",
+                        "media_type": 1,
+                        "caption": {"text": "Photo"},
+                        "user": {"username": "creator"},
+                        "image_versions2": {
+                            "candidates": [
+                                {
+                                    "url": "https://cdn.test/photo.jpg",
+                                    "width": 1080,
+                                    "height": 1350,
+                                }
+                            ]
+                        },
+                    }
+                ]
+            }
+
+    class Session:
+        headers = {}
+        cookies = [SimpleNamespace(name="sessionid", value="session")]
+
+        def get(self, url, timeout):
+            assert "/api/v1/media/" in url
+            return Response()
+
+    monkeypatch.setattr(service, "_cookie_session", lambda cookies_file: Session())
+
+    info, image_urls = service._instagram_image_post_info(
+        "https://www.instagram.com/p/Da20blqmA_f/?img_index=4", None
+    )
+
+    assert info["id"] == "Da20blqmA_f"
+    assert info["description"] == "Photo"
+    assert image_urls == ["https://cdn.test/photo.jpg"]
 
 
 def test_caption_escapes_html_and_uses_quote() -> None:
@@ -152,6 +270,12 @@ def test_sanitize_telegram_html_keeps_supported_formatting() -> None:
     assert '<a href="https://example.com">Link</a>' in caption
     assert "<blockquote expandable>Quote</blockquote>" in caption
     assert "<script>" not in caption
+
+
+def test_empty_caption_is_not_replaced_with_fallback() -> None:
+    assert resolve_caption_html(None, "Fallback") == "Fallback"
+    assert resolve_caption_html("", "Fallback") == ""
+    assert resolve_caption_html("<p><br></p>", "Fallback") == ""
 
 
 def test_manual_url_must_be_tiktok() -> None:
@@ -517,6 +641,109 @@ def test_prepare_tiktok_photo_url_falls_back_to_tikwm(tmp_path, monkeypatch) -> 
     assert video.description == "Forest"
     assert video.media_type == "image"
     assert paths == (image_path,)
+
+
+def test_prepare_instagram_image_post_without_video_download(tmp_path, monkeypatch) -> None:
+    config = Config(
+        telegram_bot_token="token",
+        telegram_chat_id="@main",
+        tiktok_channels=(),
+        poll_interval_seconds=300,
+        scan_limit=15,
+        post_existing=False,
+        data_dir=tmp_path,
+        cookies_file=None,
+        instagram_cookies_file=None,
+        youtube_cookies_file=None,
+        youtube_po_token_provider_url=None,
+        web_host="127.0.0.1",
+        web_port=8080,
+        web_username=None,
+        web_password=None,
+    )
+    first = tmp_path / "first.jpg"
+    second = tmp_path / "second.jpg"
+    first.write_bytes(b"one")
+    second.write_bytes(b"two")
+    service = TikTokToTelegram(config)
+
+    monkeypatch.setattr(
+        service,
+        "_instagram_image_post_info",
+        lambda url, cookies_file: (
+            {
+                "id": "ABC_123",
+                "description": "Summer",
+                "channel": "creator.name",
+                "webpage_url": url,
+            },
+            ["https://cdn.test/one.jpg", "https://cdn.test/two.jpg"],
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_download_images",
+        lambda urls, output_id, cookies_file: (first, second),
+    )
+
+    def fail_video(*args, **kwargs):
+        raise AssertionError("Video downloader must not be used for an Instagram image post")
+
+    monkeypatch.setattr(service, "_extract_info", fail_video)
+    monkeypatch.setattr(service, "_download_video_file", fail_video)
+
+    video, paths = service.prepare_url("https://www.instagram.com/p/ABC_123/")
+
+    assert video.video_id == "ABC_123"
+    assert video.username == "creator.name"
+    assert video.description == "Summer"
+    assert video.platform == "instagram"
+    assert video.media_type == "image"
+    assert paths == (first, second)
+
+
+def test_prepare_instagram_video_post_keeps_video_download(tmp_path, monkeypatch) -> None:
+    config = Config(
+        telegram_bot_token="token",
+        telegram_chat_id="@main",
+        tiktok_channels=(),
+        poll_interval_seconds=300,
+        scan_limit=15,
+        post_existing=False,
+        data_dir=tmp_path,
+        cookies_file=None,
+        instagram_cookies_file=None,
+        youtube_cookies_file=None,
+        youtube_po_token_provider_url=None,
+        web_host="127.0.0.1",
+        web_port=8080,
+        web_username=None,
+        web_password=None,
+    )
+    video_path = tmp_path / "video.mp4"
+    video_path.write_bytes(b"video")
+    service = TikTokToTelegram(config)
+    info = {
+        "id": "VIDEO_123",
+        "description": "Clip",
+        "channel": "creator.name",
+        "webpage_url": "https://www.instagram.com/p/VIDEO_123/",
+    }
+
+    monkeypatch.setattr(service, "_instagram_image_post_info", lambda url, cookies: ({}, []))
+    monkeypatch.setattr(service, "_extract_info", lambda url, platform, user_id: info)
+    monkeypatch.setattr(
+        service,
+        "_download_video_file",
+        lambda url, platform, output_id, user_id: (info, video_path),
+    )
+
+    video, paths = service.prepare_url("https://www.instagram.com/p/VIDEO_123/")
+
+    assert video.video_id == "VIDEO_123"
+    assert video.platform == "instagram"
+    assert video.media_type == "video"
+    assert paths == (video_path,)
 
 
 def test_service_updates_uploaded_cookies_without_restart(tmp_path) -> None:

@@ -35,6 +35,10 @@ YOUTUBE_AUTH_COOKIE_NAMES = {
     "__Secure-1PSID",
     "__Secure-3PSID",
 }
+INSTAGRAM_SHORTCODE_ALPHABET = (
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+)
+INSTAGRAM_GRAPHQL_DOC_ID = "8845758582119845"
 TELEGRAM_ALLOWED_TAGS = {
     "a",
     "b",
@@ -181,7 +185,7 @@ def validate_instagram_url(url: str) -> str:
     if parsed.scheme not in {"http", "https"} or not (
         host == "instagram.com" or host.endswith(".instagram.com")
     ):
-        raise ValueError("Нужна полная ссылка на видео Instagram")
+        raise ValueError("Нужна полная ссылка на пост Instagram")
     return url
 
 
@@ -215,6 +219,24 @@ def is_tiktok_video_url(url: str) -> bool:
 def tiktok_post_id_from_url(url: str) -> str:
     match = re.search(r"/(?:video|photo)/([^/?#]+)", urlparse(url).path)
     return match.group(1) if match else ""
+
+
+def instagram_post_id_from_url(url: str) -> str:
+    match = re.search(r"/(?:p|reels?|tv)/([^/?#]+)", urlparse(url).path)
+    return match.group(1) if match else ""
+
+
+def instagram_shortcode_to_media_id(shortcode: str) -> int:
+    if len(shortcode) > 28:
+        shortcode = shortcode[:-28]
+    media_id = 0
+    for character in shortcode:
+        try:
+            value = INSTAGRAM_SHORTCODE_ALPHABET.index(character)
+        except ValueError as error:
+            raise ValueError("Некорректная ссылка на Instagram-пост") from error
+        media_id = media_id * 64 + value
+    return media_id
 
 
 def username_from_info(info: dict[str, Any], webpage_url: str) -> str:
@@ -332,6 +354,118 @@ def tiktok_image_post_urls_from_data(data: Any) -> list[str]:
     return urls
 
 
+def instagram_image_post_from_media(
+    media: dict[str, Any], webpage_url: str
+) -> tuple[dict[str, Any], list[str]]:
+    carousel_media = media.get("carousel_media")
+    if not isinstance(carousel_media, list):
+        sidecar = media.get("edge_sidecar_to_children")
+        edges = sidecar.get("edges") if isinstance(sidecar, dict) else []
+        carousel_media = [edge.get("node") for edge in edges or [] if isinstance(edge, dict)]
+    media_items = carousel_media or [media]
+
+    image_urls: list[str] = []
+    for item in media_items:
+        if not isinstance(item, dict):
+            continue
+        typename = str(item.get("__typename") or "").lower()
+        if (
+            item.get("is_video") is True
+            or item.get("media_type") == 2
+            or "video" in typename
+            or item.get("video_url")
+            or item.get("video_versions")
+        ):
+            continue
+
+        candidates: list[tuple[int, str]] = []
+        image_versions = item.get("image_versions2") or {}
+        version_candidates = (
+            image_versions.get("candidates") if isinstance(image_versions, dict) else []
+        )
+        for candidate in version_candidates or []:
+            if not isinstance(candidate, dict) or not candidate.get("url"):
+                continue
+            resolution = int(candidate.get("width") or 0) * int(
+                candidate.get("height") or 0
+            )
+            candidates.append((resolution, str(candidate["url"])))
+        for candidate in item.get("display_resources") or []:
+            if not isinstance(candidate, dict) or not candidate.get("src"):
+                continue
+            resolution = int(candidate.get("config_width") or 0) * int(
+                candidate.get("config_height") or 0
+            )
+            candidates.append((resolution, str(candidate["src"])))
+        for key in ("display_url", "display_src"):
+            if item.get(key):
+                candidates.append((0, str(item[key])))
+        if candidates:
+            image_urls.append(max(candidates, key=lambda candidate: candidate[0])[1])
+
+    user = media.get("user") or media.get("owner") or {}
+    if not isinstance(user, dict):
+        user = {}
+    caption = media.get("caption")
+    if isinstance(caption, dict):
+        description = str(caption.get("text") or "")
+    else:
+        description = str(caption or "")
+    if not description:
+        caption_data = media.get("edge_media_to_caption")
+        edges = caption_data.get("edges") if isinstance(caption_data, dict) else []
+        if edges and isinstance(edges[0], dict):
+            description = str((edges[0].get("node") or {}).get("text") or "")
+    username = str(user.get("username") or "").strip().lstrip("@")
+    post_id = str(
+        media.get("code")
+        or media.get("shortcode")
+        or instagram_post_id_from_url(webpage_url)
+    )
+    info = {
+        "id": post_id,
+        "description": description,
+        "title": description,
+        "channel": username,
+        "uploader": str(user.get("full_name") or username),
+        "uploader_url": f"https://www.instagram.com/{username}/" if username else "",
+        "timestamp": int(media.get("taken_at") or media.get("taken_at_timestamp") or 0),
+        "webpage_url": webpage_url,
+    }
+    return info, unique_image_urls(image_urls)
+
+
+def instagram_media_candidates_from_data(
+    data: Any, post_id: str
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[int] = set()
+
+    def add(value: Any) -> None:
+        if not isinstance(value, dict) or id(value) in seen:
+            return
+        seen.add(id(value))
+        candidates.append(value)
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            for key in ("xdt_shortcode_media", "shortcode_media"):
+                add(value.get(key))
+            code = str(value.get("code") or value.get("shortcode") or "")
+            if code == post_id:
+                add(value)
+            for key, item in value.items():
+                if key in {"carousel_media", "edge_sidecar_to_children"}:
+                    continue
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    walk(data)
+    return candidates
+
+
 def has_youtube_auth_cookies(path: Path | None) -> bool:
     if not path or not path.is_file():
         return False
@@ -431,11 +565,12 @@ def build_youtube_caption(
 
 
 def resolve_caption_html(
-    caption_html: str = "",
+    caption_html: str | None = None,
     fallback: str = "",
 ) -> str:
-    caption = sanitize_telegram_html(caption_html)
-    return caption or fallback
+    if caption_html is None:
+        return fallback
+    return sanitize_telegram_html(caption_html)
 
 
 class TikTokToTelegram:
@@ -749,6 +884,7 @@ class TikTokToTelegram:
                 )
             }
         )
+
         if cookies_file and cookies_file.exists():
             jar = http.cookiejar.MozillaCookieJar(str(cookies_file))
             try:
@@ -780,6 +916,131 @@ class TikTokToTelegram:
                 seen.add(key)
                 urls.append(image_url)
         return urls
+
+    def _instagram_image_post_info(
+        self, url: str, cookies_file: Path | None
+    ) -> tuple[dict[str, Any], list[str]]:
+        post_id = instagram_post_id_from_url(url)
+        if not post_id:
+            return {}, []
+        session = self._cookie_session(cookies_file)
+        session.headers.update(
+            {
+                "Accept": "*/*",
+                "Origin": "https://www.instagram.com",
+                "Referer": url,
+                "X-ASBD-ID": "198387",
+                "X-IG-App-ID": "936619743392459",
+                "X-IG-WWW-Claim": "0",
+            }
+        )
+
+        def cookie_value(name: str) -> str:
+            return next(
+                (cookie.value for cookie in session.cookies if cookie.name == name), ""
+            )
+
+        def extract(payload: Any) -> tuple[dict[str, Any], list[str]]:
+            fallback_info: dict[str, Any] = {}
+            for media in instagram_media_candidates_from_data(payload, post_id):
+                info, image_urls = instagram_image_post_from_media(media, url)
+                if image_urls:
+                    return info, image_urls
+                if not fallback_info:
+                    fallback_info = info
+            return fallback_info, []
+
+        if cookie_value("sessionid"):
+            try:
+                media_id = instagram_shortcode_to_media_id(post_id)
+                response = session.get(
+                    f"https://i.instagram.com/api/v1/media/{media_id}/info/",
+                    timeout=60,
+                )
+                response.raise_for_status()
+                info, image_urls = extract(response.json())
+                if image_urls:
+                    return info, image_urls
+                if info:
+                    return info, []
+            except (requests.RequestException, ValueError) as error:
+                LOGGER.info("Could not inspect Instagram post through media API: %s", error)
+
+        try:
+            media_id = instagram_shortcode_to_media_id(post_id)
+            response = session.get(
+                "https://www.instagram.com/api/v1/web/get_ruling_for_content/",
+                params={"content_type": "MEDIA", "target_id": media_id},
+                timeout=60,
+            )
+            response.raise_for_status()
+        except (requests.RequestException, ValueError) as error:
+            LOGGER.info("Could not initialize Instagram GraphQL session: %s", error)
+
+        try:
+            csrf_token = cookie_value("csrftoken")
+            response = session.get(
+                "https://www.instagram.com/graphql/query/",
+                params={
+                    "doc_id": INSTAGRAM_GRAPHQL_DOC_ID,
+                    "variables": json.dumps(
+                        {
+                            "shortcode": post_id,
+                            "child_comment_count": 3,
+                            "fetch_comment_count": 40,
+                            "parent_comment_count": 24,
+                            "has_threaded_comments": True,
+                        },
+                        separators=(",", ":"),
+                    ),
+                },
+                headers={
+                    "X-CSRFToken": csrf_token,
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+                timeout=60,
+            )
+            response.raise_for_status()
+            info, image_urls = extract(response.json())
+            if image_urls:
+                return info, image_urls
+            if info:
+                return info, []
+        except (requests.RequestException, ValueError) as error:
+            LOGGER.info("Could not inspect Instagram post through GraphQL: %s", error)
+
+        response = session.get(url, timeout=60)
+        response.raise_for_status()
+        script_matches = re.findall(
+            r'<script[^>]+type=["\']application/(?:ld\+)?json["\'][^>]*>(.*?)</script>',
+            response.text,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        for script in script_matches:
+            try:
+                payload = json.loads(html.unescape(script))
+            except json.JSONDecodeError:
+                continue
+            info, image_urls = extract(payload)
+            if image_urls:
+                return info, image_urls
+
+        if "og:video" not in response.text.lower():
+            image_match = re.search(
+                r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
+                response.text,
+                flags=re.IGNORECASE,
+            ) or re.search(
+                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+                response.text,
+                flags=re.IGNORECASE,
+            )
+            if image_match:
+                return {
+                    "id": post_id,
+                    "webpage_url": url,
+                }, [html.unescape(image_match.group(1))]
+        return {}, []
 
     def _tikwm_image_post_info(self, url: str) -> tuple[dict[str, Any], list[str]]:
         response = requests.get(
@@ -817,7 +1078,7 @@ class TikTokToTelegram:
     ) -> tuple[Path, ...]:
         urls = unique_image_urls(urls)
         if not urls:
-            raise ValueError("TikTok-коллаж не содержит картинок")
+            raise ValueError("Пост не содержит изображений")
         session = self._cookie_session(cookies_file)
         paths: list[Path] = []
         try:
@@ -908,6 +1169,24 @@ class TikTokToTelegram:
             else:
                 info, path = self._download_video_file(url, platform, output_id, user_id)
                 paths = (path,)
+        elif platform == "instagram" and "/p/" in urlparse(url).path:
+            try:
+                info, image_urls = self._instagram_image_post_info(
+                    url, self._cookie_file(platform, user_id)
+                )
+            except Exception as error:
+                LOGGER.info("Could not inspect Instagram image post %s: %s", url, error)
+                info, image_urls = {}, []
+            if image_urls:
+                media_type = "image"
+                paths = self._download_images(
+                    image_urls, output_id, self._cookie_file(platform, user_id)
+                )
+            else:
+                info = self._extract_info(url, platform, user_id)
+                webpage_url = str(info.get("webpage_url") or url)
+                info, path = self._download_video_file(url, platform, output_id, user_id)
+                paths = (path,)
         else:
             info = self._extract_info(url, platform, user_id)
             webpage_url = str(info.get("webpage_url") or url)
@@ -917,7 +1196,15 @@ class TikTokToTelegram:
         webpage_url = str(info.get("webpage_url") or webpage_url or url)
         username, author_url = media_author_from_info(info, webpage_url, platform)
         video = Video(
-            video_id=str(info.get("id") or tiktok_post_id_from_url(webpage_url) or output_id),
+            video_id=str(
+                info.get("id")
+                or (
+                    instagram_post_id_from_url(webpage_url)
+                    if platform == "instagram"
+                    else tiktok_post_id_from_url(webpage_url)
+                )
+                or output_id
+            ),
             username=username,
             description=str(info.get("description") or info.get("title") or ""),
             url=webpage_url,
@@ -1128,7 +1415,7 @@ class TikTokToTelegram:
         chat_id: str | None = None,
         include_author: bool = True,
         include_description: bool = True,
-        caption_html: str = "",
+        caption_html: str | None = None,
         user_id: int = 1,
     ) -> None:
         self.ensure_service_allowed(video.platform, user_id)
@@ -1228,7 +1515,7 @@ class TikTokToTelegram:
         before_text: str = "",
         after_text: str = "",
         chat_id: str | None = None,
-        caption_html: str = "",
+        caption_html: str | None = None,
         user_id: int = 1,
     ) -> None:
         self.ensure_service_allowed("youtube", user_id)

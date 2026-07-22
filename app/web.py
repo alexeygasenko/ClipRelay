@@ -713,6 +713,16 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
                     "description": video.description,
                     "author": f"@{video.username}",
                     "preview_url": url_for("preview", job_id=job.job_id),
+                    "preview_urls": [
+                        url_for(
+                            "preview_item",
+                            job_id=job.job_id,
+                            item_index=item_index,
+                        )
+                        for item_index in range(len(job.paths))
+                    ]
+                    if video.media_type == "image"
+                    else [],
                     "video_download_url": url_for("media_video", job_id=job.job_id),
                     "post_url": url_for(
                         "media_post", job_id=job.job_id, chat_id=selected_chat_id
@@ -842,7 +852,7 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
             abort(404)
         before_text = request.form.get("before_text", "")
         after_text = request.form.get("after_text", "")
-        caption_html = request.form.get("caption_html", "")
+        caption_html = request.form.get("caption_html")
         selected_chat_id = request.form.get("chat_id", "")
         try:
             service.publish_youtube(
@@ -897,7 +907,7 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
         before_text = request.form.get("before_text", "")
         quote_text = request.form.get("quote_text", "")
         after_text = request.form.get("after_text", "")
-        caption_html = request.form.get("caption_html", "")
+        caption_html = request.form.get("caption_html")
         options_present = request.form.get("caption_options_present") == "1"
         include_author = (
             request.form.get("include_author") == "on" if options_present else True
@@ -906,12 +916,27 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
             request.form.get("include_description") == "on" if options_present else True
         )
         selected_chat_id = request.form.get("chat_id", job.selected_chat_id)
+        selected_image_indices: tuple[int, ...] | None = None
+        publish_paths = job.paths
         try:
+            if (
+                job.video.media_type == "image"
+                and request.form.get("image_selection_present") == "1"
+            ):
+                requested_indices = set(request.form.getlist("selected_image_indices"))
+                selected_image_indices = tuple(
+                    index
+                    for index in range(len(job.paths))
+                    if str(index) in requested_indices
+                )
+                if not selected_image_indices:
+                    raise ValueError("Выберите хотя бы одно изображение для публикации")
+                publish_paths = tuple(job.paths[index] for index in selected_image_indices)
             service.publish(
                 *with_user_arg(
                     (
                         job.video,
-                        job.paths,
+                        publish_paths,
                         quote_text,
                         before_text,
                         after_text,
@@ -937,6 +962,7 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
                 caption_html=caption_html,
                 include_author=include_author,
                 include_description=include_description,
+                selected_image_indices=selected_image_indices,
                 selected_chat_id=selected_chat_id,
                 telegram_channels=telegram_channels(job.user_id),
                 error=str(error),

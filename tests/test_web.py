@@ -365,11 +365,104 @@ def test_tiktok_and_instagram_media_info_returns_download_and_post_links(
     assert "chat_id=" in payload["post_url"]
     assert "second" in payload["post_url"]
     assert "/preview/" in payload["preview_url"]
+    assert payload["preview_urls"] == []
 
     response = client.get(payload["post_url"])
     assert response.status_code == 200
     assert 'name="chat_id" value="@second"' in response.text
     assert "<span data-channel-label>Second</span>" in response.text
+
+
+def test_instagram_image_preview_exposes_carousel_images(tmp_path: Path) -> None:
+    first = tmp_path / "first.jpg"
+    second = tmp_path / "second.jpg"
+    first.write_bytes(b"one")
+    second.write_bytes(b"two")
+    service = FakeService(first)
+    service.prepare_url = lambda url: (
+        Video(
+            "post1",
+            "creator",
+            "Photos",
+            url,
+            0,
+            platform="instagram",
+            media_type="image",
+        ),
+        (first, second),
+    )
+    client = create_app(make_config(tmp_path), service).test_client()
+
+    response = client.post(
+        "/media/info",
+        data={"media_url": "https://www.instagram.com/p/post1/", "chat_id": "@second"},
+    )
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["media_type"] == "image"
+    assert payload["image_count"] == 2
+    assert len(payload["preview_urls"]) == 2
+    assert payload["preview_urls"][0].endswith("/0")
+    assert payload["preview_urls"][1].endswith("/1")
+
+    response = client.get(payload["post_url"])
+    assert response.status_code == 200
+    assert "data-image-carousel" in response.text
+    assert "data-image-carousel-prev" in response.text
+    assert "data-image-carousel-next" in response.text
+    assert response.text.count("data-image-carousel-thumbnail=") == 2
+    assert response.text.count('name="selected_image_indices"') == 2
+    assert "data-image-selection-count" in response.text
+
+    job_id = payload["post_url"].split("/media/post/", 1)[1].split("?", 1)[0]
+    response = client.post(
+        f"/send/{job_id}",
+        data={
+            "image_selection_present": "1",
+            "selected_image_indices": "1",
+            "chat_id": "@second",
+        },
+    )
+
+    assert response.status_code == 302
+    assert service.published[1] == (second,)
+    assert not first.exists()
+    assert not second.exists()
+
+
+def test_image_post_requires_at_least_one_selected_image(tmp_path: Path) -> None:
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"image")
+    service = FakeService(image)
+    service.prepare_url = lambda url: (
+        Video(
+            "post1",
+            "creator",
+            "Photo",
+            url,
+            0,
+            platform="tiktok",
+            media_type="image",
+        ),
+        (image,),
+    )
+    client = create_app(make_config(tmp_path), service).test_client()
+    payload = client.post(
+        "/media/info",
+        data={"media_url": "https://www.tiktok.com/@creator/photo/post1"},
+    ).get_json()
+    job_id = payload["post_url"].split("/media/post/", 1)[1].split("?", 1)[0]
+
+    response = client.post(
+        f"/send/{job_id}",
+        data={"image_selection_present": "1"},
+    )
+
+    assert response.status_code == 502
+    assert "Выберите хотя бы одно изображение" in response.text
+    assert image.exists()
+    assert service.published is None
 
 
 def test_youtube_post_can_be_prepared_and_sent(tmp_path: Path) -> None:

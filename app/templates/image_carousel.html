@@ -1,0 +1,32 @@
+{% macro image_carousel(job=None, extra_class='', selectable=False, selected_indices=None, form_id='prepared-post-form') %}
+<div class="image-carousel {{ extra_class }}{% if selectable %} image-carousel-selectable{% endif %}" data-image-carousel tabindex="0" aria-label="Изображения публикации">
+  <div class="image-carousel-stage">
+    <img data-image-carousel-image alt="">
+    <button class="image-carousel-arrow image-carousel-prev" type="button" data-image-carousel-prev aria-label="Предыдущее изображение"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m12.5 4.5-5.5 5.5 5.5 5.5"/></svg></button>
+    <button class="image-carousel-arrow image-carousel-next" type="button" data-image-carousel-next aria-label="Следующее изображение"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7.5 4.5 5.5 5.5-5.5 5.5"/></svg></button>
+    <span class="image-carousel-counter" data-image-carousel-counter aria-live="polite"></span>
+  </div>
+  {% if selectable %}
+  <div class="image-selection-toolbar">
+    <span>К посту: <strong data-image-selection-count></strong> из {{ job.paths|length }}</span>
+    <button type="button" class="image-selection-all" data-image-selection-all>Выбрать все</button>
+  </div>
+  {% endif %}
+  <div class="image-carousel-thumbnails" data-image-carousel-thumbnails aria-label="Все изображения">
+    {% if job %}{% for _path in job.paths %}
+    {% set included = selected_indices is none or loop.index0 in selected_indices %}
+    {% if selectable %}<div class="image-carousel-thumbnail-wrap" data-image-selection-item>{% endif %}
+    <button type="button" data-image-carousel-thumbnail="{{ loop.index0 }}" data-image-source="{{ url_for('preview_item', job_id=job.job_id, item_index=loop.index0) }}" aria-label="Показать изображение {{ loop.index }}">
+      <img src="{{ url_for('preview_item', job_id=job.job_id, item_index=loop.index0) }}" alt="" loading="lazy">
+    </button>
+    {% if selectable %}
+      <label class="image-selection-toggle" aria-label="Прикрепить изображение {{ loop.index }} к посту">
+        <input type="checkbox" name="selected_image_indices" value="{{ loop.index0 }}" form="{{ form_id }}" data-image-selection{% if included %} checked{% endif %}>
+        <span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8 3 3 6-6"/></svg></span>
+      </label>
+    </div>
+    {% endif %}
+    {% endfor %}{% endif %}
+  </div>
+</div>
+{% endmacro %}

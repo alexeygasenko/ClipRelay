@@ -23,7 +23,7 @@
       <input type="hidden" name="caption_html" data-caption-html>
       <label for="caption-editor">Конструктор Telegram-поста</label>
       <p class="hint">Выделите текст и нажмите ПКМ, чтобы открыть форматирование Telegram.</p>
-      <div id="caption-editor" class="telegram-editor" contenteditable="true" spellcheck="true" data-caption-editor>{% if caption_html is defined and caption_html %}{{ caption_html|safe }}{% else %}<p><a href="{{ job.video.url }}" target="_blank" rel="noreferrer">{{ job.video.title }}</a></p><p>{{ job.video.channel }}</p>{% endif %}</div>
+      <div id="caption-editor" class="telegram-editor" contenteditable="true" spellcheck="true" data-caption-editor>{% if caption_html is defined and caption_html is not none %}{{ caption_html|safe }}{% else %}<p><a href="{{ job.video.url }}" target="_blank" rel="noreferrer">{{ job.video.title }}</a></p><p>{{ job.video.channel }}</p>{% endif %}</div>
       <div class="caption-preview">
         <strong>Предпросмотр Telegram</strong>
         <div class="telegram-preview-body" data-caption-preview></div>

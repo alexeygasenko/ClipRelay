@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "channel_picker.html" import channel_picker %}
+{% from "image_carousel.html" import image_carousel %}
 {% block body_class %}home-page source-selecting{% endblock %}
 {% block brand %}<div class="brand-line"><div class="brand-title">ClipRelay</div><button class="header-action carousel-home-action" type="button" data-carousel-home>На главную</button></div>{% endblock %}
 {% block heading %}{% endblock %}
@@ -51,7 +52,7 @@
     <div class="media-status hint" data-media-status="tiktok">Вставьте ссылку, чтобы подготовить видео или коллаж.</div>
     <article class="media-result" data-media-result="tiktok" hidden>
       <video controls playsinline data-media-preview></video>
-      <img class="media-image-preview" data-media-image-preview alt="Превью TikTok-коллажа" hidden>
+      {{ image_carousel(extra_class='media-image-carousel') }}
       <div><h3 data-media-author></h3><p data-media-description></p><div class="download-actions"><a class="secondary" data-media-download>Скачать видео</a><a class="button" data-media-post>Подготовить пост</a></div></div>
     </article>
   </div>
@@ -68,15 +69,15 @@
 
 {% if service_permissions.instagram %}
 <section class="card service-card source-panel" data-source-panel="instagram" hidden>
-  <div class="service-heading"><span class="service-mark instagram-mark">IG</span><div><h2>Instagram</h2><p>Скачивание ролика и подготовка поста</p></div></div>
-  <label for="instagram_url">Ссылка на Instagram-видео</label>
-  <input id="instagram_url" type="url" autocomplete="off" placeholder="Вставьте ссылку на видео">
+  <div class="service-heading"><span class="service-mark instagram-mark">IG</span><div><h2>Instagram</h2><p>Скачивание видео и изображений, подготовка поста</p></div></div>
+  <label for="instagram_url">Ссылка на Instagram-пост</label>
+  <input id="instagram_url" type="url" autocomplete="off" placeholder="Вставьте ссылку на видео или публикацию">
   <label>Telegram-канал или чат</label>
   {{ channel_picker("instagram_chat_id", telegram_channels) }}
-  <div class="media-status hint" data-media-status="instagram">Вставьте ссылку, чтобы подготовить видео.</div>
+  <div class="media-status hint" data-media-status="instagram">Вставьте ссылку, чтобы подготовить видео или изображения.</div>
   <article class="media-result" data-media-result="instagram" hidden>
     <video controls playsinline data-media-preview></video>
-    <img class="media-image-preview" data-media-image-preview alt="Превью Instagram" hidden>
+    {{ image_carousel(extra_class='media-image-carousel') }}
     <div><h3 data-media-author></h3><p data-media-description></p><div class="download-actions"><a class="secondary" data-media-download>Скачать видео</a><a class="button" data-media-post>Подготовить пост</a></div></div>
   </article>
 </section>
@@ -140,6 +141,7 @@
       }
     }
     window.initCaptionBuilders?.(container);
+    window.initImageCarousels?.(container);
   }
   function createReturnCarouselGhost(main) {
     const shell = main.querySelector("[data-source-carousel-shell]");
@@ -390,10 +392,16 @@
       const response = await fetch("{{ url_for('media_info') }}", {method: "POST", body: new URLSearchParams({media_url: input.value.trim(), chat_id: picker.value})});
       const data = await response.json(); if (!response.ok) throw new Error(data.error || "Не удалось обработать ссылку");
       const videoPreview = result.querySelector("[data-media-preview]");
-      const imagePreview = result.querySelector("[data-media-image-preview]");
+      const imageCarousel = result.querySelector("[data-image-carousel]");
       const isImage = data.media_type === "image";
-      videoPreview.hidden = isImage; imagePreview.hidden = !isImage;
-      if (isImage) { videoPreview.removeAttribute("src"); imagePreview.src = data.preview_url; } else { imagePreview.removeAttribute("src"); videoPreview.src = data.preview_url; }
+      videoPreview.hidden = isImage;
+      if (isImage) {
+        videoPreview.removeAttribute("src");
+        window.setImageCarouselSources?.(imageCarousel, data.preview_urls || [data.preview_url]);
+      } else {
+        window.setImageCarouselSources?.(imageCarousel, []);
+        videoPreview.src = data.preview_url;
+      }
       result.querySelector("[data-media-author]").textContent = data.author; result.querySelector("[data-media-description]").textContent = data.description;
       const downloadLink = result.querySelector("[data-media-download]");
       downloadLink.href = data.video_download_url; downloadLink.textContent = isImage ? `Скачать изображения (${data.image_count})` : "Скачать видео";

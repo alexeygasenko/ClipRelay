@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "channel_picker.html" import channel_picker %}
+{% from "image_carousel.html" import image_carousel %}
 {% block title %}Проверка публикации{% endblock %}
 {% block body_class %}editor-page{% endblock %}
 {% block eyebrow %}{% endblock %}
@@ -9,15 +10,11 @@
 {% block content %}
 <section class="editor">
   {% if job.video.media_type == "image" %}
-  <div class="image-preview-grid">
-    {% for _path in job.paths %}
-    <img src="{{ url_for('preview_item', job_id=job.job_id, item_index=loop.index0) }}" alt="Изображение {{ loop.index }}">
-    {% endfor %}
-  </div>
+  {{ image_carousel(job, 'editor-image-carousel', True, selected_image_indices if selected_image_indices is defined else none) }}
   {% else %}
   <video controls preload="metadata" src="{{ url_for('preview', job_id=job.job_id) }}"></video>
   {% endif %}
-  <form class="card" action="{{ url_for('send', job_id=job.job_id) }}" method="post" autocomplete="off">
+  <form id="prepared-post-form" class="card" action="{{ url_for('send', job_id=job.job_id) }}" method="post" autocomplete="off">
     <div class="author">
       Автор:
       <a href="{{ job.video.author_url or ('https://www.tiktok.com/@' ~ job.video.username) }}" target="_blank" rel="noreferrer">
@@ -32,11 +29,12 @@
     <input type="hidden" name="before_text" value="">
     <input type="hidden" name="quote_text" value="{{ job.video.description }}">
     <input type="hidden" name="after_text" value="">
+    {% if job.video.media_type == "image" %}<input type="hidden" name="image_selection_present" value="1">{% endif %}
     <div class="telegram-builder" data-caption-builder>
       <input type="hidden" name="caption_html" data-caption-html>
       <label for="caption-editor">Конструктор Telegram-поста</label>
       <p class="hint">Выделите текст и нажмите ПКМ, чтобы открыть форматирование Telegram.</p>
-      <div id="caption-editor" class="telegram-editor" contenteditable="true" spellcheck="true" data-caption-editor>{% if caption_html is defined and caption_html %}{{ caption_html|safe }}{% else %}<p><a href="{{ job.video.author_url or ('https://www.tiktok.com/@' ~ job.video.username) }}" target="_blank" rel="noreferrer">@{{ job.video.username }}</a></p><blockquote>{{ job.video.description }}</blockquote>{% endif %}</div>
+      <div id="caption-editor" class="telegram-editor" contenteditable="true" spellcheck="true" data-caption-editor>{% if caption_html is defined and caption_html is not none %}{{ caption_html|safe }}{% else %}<p><a href="{{ job.video.author_url or ('https://www.tiktok.com/@' ~ job.video.username) }}" target="_blank" rel="noreferrer">@{{ job.video.username }}</a></p><blockquote>{{ job.video.description }}</blockquote>{% endif %}</div>
       <div class="caption-preview">
         <strong>Предпросмотр Telegram</strong>
         <div class="telegram-preview-body" data-caption-preview></div>
