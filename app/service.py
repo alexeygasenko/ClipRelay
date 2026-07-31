@@ -55,7 +55,8 @@ SPOTIFY_TRACK_URL_IN_TEXT_RE = re.compile(
     flags=re.IGNORECASE,
 )
 TELEGRAM_DOWNLOAD_COMMAND_RE = re.compile(
-    r"^/(?P<command>spotify|instagram)(?:@[A-Za-z0-9_]+)?(?:\s|$)",
+    r"^/(?P<command>spotifysearch|spotify|instagram)"
+    r"(?:@[A-Za-z0-9_]+)?(?:\s|$)",
     flags=re.IGNORECASE,
 )
 TELEGRAM_ALLOWED_TAGS = {
@@ -1012,6 +1013,12 @@ class TikTokToTelegram:
                     "description": "Скачать трек по ссылке Spotify",
                 }
             )
+            commands.append(
+                {
+                    "command": "spotifysearch",
+                    "description": "Найти и скачать трек Spotify",
+                }
+            )
         if user.allow_instagram:
             commands.append(
                 {
@@ -1110,6 +1117,31 @@ class TikTokToTelegram:
         return int(message_id) if message_id is not None else None
 
     @staticmethod
+    def _telegram_edit_text(
+        bot_token: str,
+        chat_id: str,
+        message_id: int | None,
+        text: str,
+    ) -> None:
+        if message_id is None:
+            return
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{bot_token}/editMessageText",
+                data={
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "text": text[:4096],
+                },
+                timeout=30,
+            )
+            payload = response.json()
+            if not payload.get("ok"):
+                LOGGER.info("Could not update Telegram command status message")
+        except (requests.RequestException, requests.JSONDecodeError):
+            LOGGER.info("Could not update Telegram command status message")
+
+    @staticmethod
     def _telegram_finish_status(
         bot_token: str,
         chat_id: str,
@@ -1197,6 +1229,18 @@ class TikTokToTelegram:
                 message_thread_id,
             )
             return
+        if command == "spotifysearch":
+            query = text.strip()[command_match.end() :].strip()
+            if not query:
+                query = self._telegram_message_text(reply).strip()
+            self._process_telegram_spotify_search_command(
+                query,
+                bot_token,
+                chat_id,
+                user_id,
+                message_thread_id,
+            )
+            return
         self._process_telegram_spotify_command(
             link_source,
             bot_token,
@@ -1255,6 +1299,73 @@ class TikTokToTelegram:
                 chat_id,
                 status_message_id,
                 str(error),
+            )
+            return
+        self._telegram_finish_status(
+            bot_token,
+            chat_id,
+            status_message_id,
+        )
+
+    def _process_telegram_spotify_search_command(
+        self,
+        query: str,
+        bot_token: str,
+        chat_id: str,
+        user_id: int,
+        message_thread_id: int | None,
+    ) -> None:
+        if not query:
+            self._telegram_send_text(
+                bot_token,
+                chat_id,
+                "Добавьте название трека или исполнителя после команды "
+                "/spotifysearch",
+                message_thread_id,
+            )
+            return
+
+        status_message_id = self._telegram_send_text(
+            bot_token,
+            chat_id,
+            "Ищу трек в Spotify…",
+            message_thread_id,
+        )
+        try:
+            track = self.search_spotify(query, user_id)
+            found = f"Нашёл: {track.title}"
+            if track.artist:
+                found += f" — {track.artist}"
+            self._telegram_edit_text(
+                bot_token,
+                chat_id,
+                status_message_id,
+                f"{found}\nГотовлю MP3 320 кбит/с…",
+            )
+            path = self.download_spotify(
+                track,
+                f"spotify-{user_id}-{track.track_id}",
+                user_id,
+            )
+            self._publish_spotify_to_telegram(
+                track,
+                path,
+                bot_token,
+                chat_id,
+                caption_html=None,
+                message_thread_id=message_thread_id,
+            )
+        except Exception as error:
+            LOGGER.exception(
+                "Failed to process Telegram Spotify search for user %s",
+                user_id,
+            )
+            self._telegram_finish_status(
+                bot_token,
+                chat_id,
+                status_message_id,
+                str(error),
+                "Не удалось найти или скачать трек",
             )
             return
         self._telegram_finish_status(
@@ -1842,6 +1953,88 @@ class TikTokToTelegram:
             for partial_file in self.download_dir.glob(f"{output_id}.*"):
                 partial_file.unlink()
             raise
+
+    def search_spotify(self, query: str, user_id: int = 1) -> SpotifyTrack:
+        self.ensure_service_allowed("spotify", user_id)
+        query = " ".join(query.split())
+        if len(query) < 2:
+            raise ValueError("Название трека должно содержать хотя бы 2 символа")
+        if len(query) > 200:
+            raise ValueError("Название трека не должно быть длиннее 200 символов")
+        cookies_file = self._cookie_file("spotify", user_id)
+        if not has_spotify_auth_cookie(cookies_file):
+            raise ValueError(
+                "Сначала загрузите Spotify cookies.txt в настройках. "
+                "В файле должен быть cookie sp_dc с open.spotify.com."
+            )
+
+        with tempfile.TemporaryDirectory(
+            prefix="spotify-search-",
+            dir=self.download_dir,
+        ) as temporary_dir:
+            output_file = Path(temporary_dir) / "result.json"
+            command = [
+                sys.executable,
+                "-m",
+                "app.spotify_search",
+                str(cookies_file),
+                query,
+                str(output_file),
+            ]
+            try:
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=2 * 60,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as error:
+                raise ValueError(
+                    "Spotify не успел выполнить поиск за 2 минуты"
+                ) from error
+            except OSError as error:
+                raise ValueError("Модуль поиска Spotify не установлен") from error
+            output = f"{result.stdout}\n{result.stderr}".strip()
+            if result.returncode != 0 or not output_file.is_file():
+                normalized = output.lower()
+                if "не нашёл подходящих треков" in normalized:
+                    raise ValueError("Spotify не нашёл подходящих треков")
+                if (
+                    "sp_dc" in normalized
+                    or "could not authenticate" in normalized
+                    or "bad credentials" in normalized
+                ):
+                    raise ValueError(
+                        "Spotify cookies недействительны или устарели. "
+                        "Загрузите новый cookies.txt из авторизованной сессии."
+                    )
+                LOGGER.warning("Spotify search failed: %s", output)
+                raise ValueError(
+                    "Spotify временно не разрешил поиск. Повторите попытку позже."
+                )
+            try:
+                payload = json.loads(output_file.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError) as error:
+                raise ValueError(
+                    "Spotify вернул повреждённый результат поиска"
+                ) from error
+
+        track_id = str(payload.get("track_id") or "")
+        if not SPOTIFY_TRACK_ID_RE.fullmatch(track_id):
+            raise ValueError("Spotify вернул некорректный трек")
+        track = SpotifyTrack(
+            track_id=track_id,
+            title=str(payload.get("title") or "").strip(),
+            url=f"https://open.spotify.com/track/{track_id}",
+            thumbnail_url=str(payload.get("thumbnail_url") or "").strip(),
+            artist=str(payload.get("artist") or "").strip(),
+        )
+        if not track.title:
+            raise ValueError("Spotify не вернул название найденного трека")
+        if not track.thumbnail_url:
+            return self.get_spotify_info(track.url, user_id)
+        return track
 
     def get_spotify_info(self, url: str, user_id: int = 1) -> SpotifyTrack:
         self.ensure_service_allowed("spotify", user_id)

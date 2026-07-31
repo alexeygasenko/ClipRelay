@@ -55,16 +55,20 @@ track can be requested directly in a Telegram chat:
 
 ```text
 /spotify https://open.spotify.com/track/…
+/spotifysearch approximate track or artist name
 /instagram https://www.instagram.com/p/…
 ```
 
 You can also reply to a message containing a link with `/spotify` or
-`/instagram`. Spotify sends the same pair of messages as the web interface: the
-cover with the post caption, followed by the MP3 with track metadata and cover
-thumbnail. Instagram sends the post video or all carousel images with the
-author and description. For a newly added group, the first ClipRelay command
-must be sent by a group administrator; ClipRelay then saves that chat as a
-Telegram destination.
+`/instagram`, or reply with `/spotifysearch` to a message containing an
+approximate track title. Spotify search uses the authenticated Spotify catalog,
+selects its highest-ranked track, and then downloads the original Spotify stream
+in the same way as a direct link. Spotify sends the same pair of messages as the
+web interface: the cover with the post caption, followed by the MP3 with track
+metadata and cover thumbnail. Instagram sends the post video or all carousel
+images with the author and description. For a newly added group, the first
+ClipRelay command must be sent by a group administrator; ClipRelay then saves
+that chat as a Telegram destination.
 
 Each user has separate Telegram destinations, TikTok monitoring settings, and
 cookies. In the "Telegram settings and cookies" section, you can:

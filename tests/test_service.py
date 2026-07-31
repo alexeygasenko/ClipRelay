@@ -35,6 +35,7 @@ from app.service import (
     spotify_track_url_from_text,
     tiktok_image_post_urls_from_data,
 )
+from app.spotify_search import track_from_pathfinder, track_from_web_api
 
 
 def make_service_config(tmp_path: Path) -> Config:
@@ -611,7 +612,109 @@ def test_instagram_url_can_be_read_from_command_or_reply() -> None:
         instagram_url_from_text("/instagram")
 
 
-def test_telegram_command_menu_contains_spotify_and_instagram(
+def test_spotify_search_payload_uses_first_track_and_largest_cover() -> None:
+    track_data = {
+        "id": "6VK8OMA2FhX4KoS3QCH7rL",
+        "name": "Aria Math",
+        "artists": {
+            "items": [
+                {"profile": {"name": "C418"}},
+                {"profile": {"name": "Second Artist"}},
+            ]
+        },
+        "albumOfTrack": {
+            "coverArt": {
+                "sources": [
+                    {"url": "https://i.scdn.co/small.jpg", "width": 64, "height": 64},
+                    {"url": "https://i.scdn.co/large.jpg", "width": 640, "height": 640},
+                ]
+            }
+        },
+    }
+    pathfinder = {
+        "data": {
+            "searchV2": {
+                "tracksV2": {"items": [{"item": {"data": track_data}}]}
+            }
+        }
+    }
+    web_api = {
+        "tracks": {
+            "items": [
+                {
+                    "id": track_data["id"],
+                    "name": track_data["name"],
+                    "artists": [{"name": "C418"}],
+                    "album": {
+                        "images": [
+                            {
+                                "url": "https://i.scdn.co/large.jpg",
+                                "width": 640,
+                                "height": 640,
+                            }
+                        ]
+                    },
+                }
+            ]
+        }
+    }
+
+    result = track_from_pathfinder(pathfinder)
+
+    assert result == {
+        "track_id": "6VK8OMA2FhX4KoS3QCH7rL",
+        "title": "Aria Math",
+        "artist": "C418, Second Artist",
+        "thumbnail_url": "https://i.scdn.co/large.jpg",
+        "url": "https://open.spotify.com/track/6VK8OMA2FhX4KoS3QCH7rL",
+    }
+    assert track_from_web_api(web_api)["artist"] == "C418"
+
+
+def test_service_searches_spotify_with_authenticated_catalog(
+    tmp_path, monkeypatch
+) -> None:
+    service = TikTokToTelegram(make_service_config(tmp_path))
+    cookies = tmp_path / "users" / "1" / "spotify-cookies.txt"
+    cookies.parent.mkdir(parents=True, exist_ok=True)
+    cookies.write_text(
+        "# Netscape HTTP Cookie File\n"
+        ".spotify.com\tTRUE\t/\tTRUE\t0\tsp_dc\tsecret\n",
+        encoding="utf-8",
+    )
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured.update(command=command, kwargs=kwargs)
+        Path(command[-1]).write_text(
+            json.dumps(
+                {
+                    "track_id": "6VK8OMA2FhX4KoS3QCH7rL",
+                    "title": "Aria Math",
+                    "artist": "C418",
+                    "thumbnail_url": "https://i.scdn.co/cover.jpg",
+                }
+            ),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("app.service.subprocess.run", fake_run)
+
+    track = service.search_spotify("  aria   math  ")
+
+    assert captured["command"][1:3] == ["-m", "app.spotify_search"]
+    assert captured["command"][-2] == "aria math"
+    assert track == SpotifyTrack(
+        "6VK8OMA2FhX4KoS3QCH7rL",
+        "Aria Math",
+        "https://open.spotify.com/track/6VK8OMA2FhX4KoS3QCH7rL",
+        "https://i.scdn.co/cover.jpg",
+        "C418",
+    )
+
+
+def test_telegram_command_menu_contains_spotify_search_and_instagram(
     tmp_path, monkeypatch
 ) -> None:
     service = TikTokToTelegram(make_service_config(tmp_path))
@@ -630,7 +733,11 @@ def test_telegram_command_menu_contains_spotify_and_instagram(
     service._ensure_telegram_commands("token", 1)
 
     commands = json.loads(captured["data"]["commands"])
-    assert [item["command"] for item in commands] == ["spotify", "instagram"]
+    assert [item["command"] for item in commands] == [
+        "spotify",
+        "spotifysearch",
+        "instagram",
+    ]
 
 
 def test_telegram_spotify_command_registers_admin_chat_and_publishes(
@@ -786,6 +893,99 @@ def test_telegram_spotify_command_reads_link_from_replied_message(
 
     assert captured["url"] == (
         "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC"
+    )
+
+
+def test_telegram_spotify_search_finds_and_publishes_track(
+    tmp_path, monkeypatch
+) -> None:
+    service = TikTokToTelegram(make_service_config(tmp_path))
+    audio = tmp_path / "aria-math.mp3"
+    audio.write_bytes(b"mp3")
+    track = SpotifyTrack(
+        "6VK8OMA2FhX4KoS3QCH7rL",
+        "Aria Math",
+        "https://open.spotify.com/track/6VK8OMA2FhX4KoS3QCH7rL",
+        "https://i.scdn.co/cover.jpg",
+        "C418",
+    )
+    calls = []
+    captured = {}
+
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    def fake_post(url, data, timeout):
+        calls.append((url.rsplit("/", 1)[-1], dict(data)))
+        if url.endswith("/sendMessage"):
+            return Response({"ok": True, "result": {"message_id": 75}})
+        return Response({"ok": True, "result": True})
+
+    def fake_search(query, user_id=1):
+        captured.update(query=query, user_id=user_id)
+        return track
+
+    def fake_publish(track_arg, path, bot_token, chat_id, **kwargs):
+        captured.update(
+            track=track_arg,
+            path=path,
+            bot_token=bot_token,
+            chat_id=chat_id,
+            kwargs=kwargs,
+        )
+
+    monkeypatch.setattr("app.service.requests.post", fake_post)
+    monkeypatch.setattr(service, "search_spotify", fake_search)
+    monkeypatch.setattr(
+        service, "download_spotify", lambda track_arg, output_id, user_id=1: audio
+    )
+    monkeypatch.setattr(service, "_publish_spotify_to_telegram", fake_publish)
+
+    service.process_telegram_update(
+        {
+            "message": {
+                "text": "/spotifysearch aria math c418",
+                "chat": {"id": 123, "type": "private"},
+                "from": {"id": 42},
+                "message_thread_id": 19,
+            }
+        },
+        "command-token",
+        1,
+    )
+
+    assert captured == {
+        "query": "aria math c418",
+        "user_id": 1,
+        "track": track,
+        "path": audio,
+        "bot_token": "command-token",
+        "chat_id": "123",
+        "kwargs": {"caption_html": None, "message_thread_id": 19},
+    }
+    assert calls[0] == (
+        "sendMessage",
+        {
+            "chat_id": "123",
+            "text": "Ищу трек в Spotify…",
+            "message_thread_id": 19,
+        },
+    )
+    assert calls[1] == (
+        "editMessageText",
+        {
+            "chat_id": "123",
+            "message_id": 75,
+            "text": "Нашёл: Aria Math — C418\nГотовлю MP3 320 кбит/с…",
+        },
+    )
+    assert calls[-1] == (
+        "deleteMessage",
+        {"chat_id": "123", "message_id": 75},
     )
 
 
