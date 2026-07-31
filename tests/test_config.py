@@ -54,6 +54,8 @@ instagram:
   cookies_file: instagram-cookies.txt
 youtube:
   cookies_file: youtube-cookies.txt
+spotify:
+  cookies_file: spotify-cookies.txt
 """,
         encoding="utf-8",
     )
@@ -64,6 +66,7 @@ youtube:
     assert config.cookies_file == tmp_path / "tiktok-cookies.txt"
     assert config.instagram_cookies_file == tmp_path / "instagram-cookies.txt"
     assert config.youtube_cookies_file == tmp_path / "youtube-cookies.txt"
+    assert config.spotify_cookies_file == tmp_path / "spotify-cookies.txt"
 
 
 def test_environment_overrides_yaml(tmp_path: Path, monkeypatch) -> None:

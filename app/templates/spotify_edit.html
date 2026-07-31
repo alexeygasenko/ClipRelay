@@ -1,19 +1,19 @@
 {% extends "base.html" %}
 {% from "channel_picker.html" import channel_picker %}
-{% block title %}Подготовка YouTube-поста{% endblock %}
+{% block title %}Подготовка Spotify-поста{% endblock %}
 {% block body_class %}editor-page{% endblock %}
 {% block eyebrow %}{% endblock %}
 {% block brand %}<div class="brand-line"><div class="brand-title">ClipRelay</div><a class="header-action back-link" href="{{ url_for('index') }}" data-return-carousel>← Назад</a><a class="header-action back-link" href="{{ url_for('index') }}" data-return-home>На главную</a></div>{% endblock %}
-{% block heading %}Подготовьте YouTube-пост{% endblock %}
-{% block lead %}В Telegram отправятся превью, ссылка на видео и подготовленный текст.{% endblock %}
+{% block heading %}Подготовьте Spotify-пост{% endblock %}
+{% block lead %}В Telegram отправятся MP3-трек и подготовленная подпись.{% endblock %}
 {% block content %}
-<section class="editor youtube-post-editor">
-  <div class="youtube-post-media">
-    <img src="{{ job.video.thumbnail_url }}" alt="Превью {{ job.video.title }}">
-    <h2>{{ job.video.title }}</h2>
-    <p>{{ job.video.channel }}</p>
+<section class="editor spotify-post-editor">
+  <div class="youtube-post-media spotify-post-media">
+    <img src="{{ track.thumbnail_url }}" alt="Обложка {{ track.title }}">
+    <h2>{{ track.title }}</h2>
+    <p>{{ track.artist }}</p>
   </div>
-  <form class="card" action="{{ url_for('youtube_send', job_id=job.job_id) }}" method="post" autocomplete="off" data-telegram-publish-form>
+  <form class="card" action="{{ url_for('spotify_send', track_id=track.track_id) }}" method="post" autocomplete="off" data-telegram-publish-form>
     <label for="chat_id">Опубликовать в Telegram-канал</label>
     {{ channel_picker("chat_id", telegram_channels, selected_chat_id if selected_chat_id is defined else "") }}
 
@@ -23,7 +23,7 @@
       <input type="hidden" name="caption_html" data-caption-html>
       <label for="caption-editor">Конструктор Telegram-поста</label>
       <p class="hint">Выделите текст и нажмите ПКМ, чтобы открыть форматирование Telegram.</p>
-      <div id="caption-editor" class="telegram-editor" contenteditable="true" spellcheck="true" data-caption-editor>{% if caption_html is defined and caption_html is not none %}{{ caption_html|safe }}{% else %}<p><a href="{{ job.video.url }}" target="_blank" rel="noreferrer">{{ job.video.title }}</a></p><p>{{ job.video.channel }}</p>{% endif %}</div>
+      <div id="caption-editor" class="telegram-editor" contenteditable="true" spellcheck="true" data-caption-editor>{% if caption_html is defined and caption_html is not none %}{{ caption_html|safe }}{% else %}<p><a href="{{ track.url }}" target="_blank" rel="noreferrer">{{ track.title }}</a></p>{% if track.artist %}<p>{{ track.artist }}</p>{% endif %}{% endif %}</div>
       <div class="caption-preview">
         <strong>Предпросмотр Telegram</strong>
         <div class="telegram-preview-body" data-caption-preview></div>

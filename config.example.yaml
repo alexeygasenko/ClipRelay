@@ -27,6 +27,11 @@ youtube:
   # cookies_file: youtube-cookies.txt
   po_token_provider_url: http://bgutil-provider:4416
 
+spotify:
+  # Cookies open.spotify.com в Netscape-формате. Для 320 кбит/с нужен Premium
+  # и cookie sp_dc. Файл также можно загрузить через настройки приложения.
+  # cookies_file: spotify-cookies.txt
+
 web:
   host: 0.0.0.0
   port: 8080

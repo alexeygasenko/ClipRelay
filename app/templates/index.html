@@ -12,7 +12,7 @@
   {% if service_permissions.tiktok %}
   <button class="source-tab" type="button" data-source-tab="tiktok" aria-label="Выбрать TikTok">
     <span class="source-logo tiktok-logo" aria-hidden="true">
-      <svg viewBox="0 0 24 24"><path d="M14.4 3c.4 3 2.1 4.8 5 5v3.3a8.5 8.5 0 0 1-5-1.6v6.4c0 3.2-2.2 5.6-5.5 5.6-3 0-5.2-2-5.2-4.8 0-3.1 2.5-5 5.8-4.7v3.3c-1.4-.3-2.4.3-2.4 1.4 0 .9.7 1.5 1.8 1.5 1.2 0 2-.8 2-2.4V3h3.5z"/></svg>
+      <img src="{{ url_for('static', filename='source-icons/tiktok.png', v=1) }}" alt="">
     </span>
     TikTok
   </button>
@@ -20,7 +20,7 @@
   {% if service_permissions.instagram %}
   <button class="source-tab" type="button" data-source-tab="instagram" aria-label="Выбрать Instagram">
     <span class="source-logo instagram-logo" aria-hidden="true">
-      <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="5"/><circle cx="12" cy="12" r="3.6"/><circle cx="16.8" cy="7.2" r="1"/></svg>
+      <img src="{{ url_for('static', filename='source-icons/instagram.png', v=1) }}" alt="">
     </span>
     Instagram
   </button>
@@ -28,9 +28,17 @@
   {% if service_permissions.youtube %}
   <button class="source-tab" type="button" data-source-tab="youtube" aria-label="Выбрать YouTube">
     <span class="source-logo youtube-logo" aria-hidden="true">
-      <svg viewBox="0 0 24 24"><path d="M21 8.2a3 3 0 0 0-2.1-2.1C17 5.6 12 5.6 12 5.6s-5 0-6.9.5A3 3 0 0 0 3 8.2 31 31 0 0 0 2.5 12a31 31 0 0 0 .5 3.8 3 3 0 0 0 2.1 2.1c1.9.5 6.9.5 6.9.5s5 0 6.9-.5a3 3 0 0 0 2.1-2.1c.4-1.4.5-3.8.5-3.8s0-2.4-.5-3.8z"/><path class="youtube-play" d="m10.2 15.2 5-3.2-5-3.2v6.4z"/></svg>
+      <img src="{{ url_for('static', filename='source-icons/youtube.png', v=1) }}" alt="">
     </span>
     YouTube
+  </button>
+  {% endif %}
+  {% if service_permissions.spotify %}
+  <button class="source-tab" type="button" data-source-tab="spotify" aria-label="Выбрать Spotify">
+    <span class="source-logo spotify-logo" aria-hidden="true">
+      <img src="{{ url_for('static', filename='source-icons/spotify.png', v=1) }}" alt="">
+    </span>
+    Spotify
   </button>
   {% endif %}
 </nav>
@@ -94,11 +102,29 @@
   </article>
 </section>
 {% endif %}
+
+{% if service_permissions.spotify %}
+<section class="card service-card source-panel spotify-card" data-source-panel="spotify" hidden>
+  <div class="service-heading"><span class="service-mark spotify-mark">SP</span><div><h2>Spotify</h2><p>MP3 320 кбит/с и Telegram-посты</p></div></div>
+  <label for="spotify_url">Ссылка на трек Spotify</label>
+  <input id="spotify_url" type="url" placeholder="https://open.spotify.com/track/…" autocomplete="off">
+  <label>Telegram-канал или чат</label>
+  {{ channel_picker("spotify_chat_id", telegram_channels) }}
+  <div id="spotify-status" class="hint">Вставьте ссылку на отдельный трек. Для 320 кбит/с нужен Premium и cookies с sp_dc.</div>
+  <article id="spotify-result" class="youtube-result spotify-result" hidden>
+    <img id="spotify-thumbnail" alt="Обложка трека Spotify"><div class="youtube-meta"><h3 id="spotify-title"></h3><p id="spotify-artist"></p><p class="hint">MP3 · 320 кбит/с</p><div class="download-actions"><a id="spotify-audio-download" class="secondary"><span data-download-label>Скачать MP3</span></a><a id="spotify-post" class="button">Подготовить пост</a></div></div>
+  </article>
+</section>
+{% endif %}
 </div>
 
 <div id="page-transition" class="page-transition" aria-live="polite" hidden><div class="transition-orb"><span></span><span></span><span></span></div><strong>Подготавливаем публикацию</strong><p>Загружаем видео и открываем конструктор подписи</p></div>
 <script>
-  const sourceOrder = [{% if service_permissions.tiktok %}"tiktok"{% endif %}{% if service_permissions.tiktok and (service_permissions.instagram or service_permissions.youtube) %}, {% endif %}{% if service_permissions.instagram %}"instagram"{% endif %}{% if service_permissions.instagram and service_permissions.youtube %}, {% endif %}{% if service_permissions.youtube %}"youtube"{% endif %}];
+  const sourceOrder = [];
+  {% if service_permissions.tiktok %}sourceOrder.push("tiktok");{% endif %}
+  {% if service_permissions.instagram %}sourceOrder.push("instagram");{% endif %}
+  {% if service_permissions.youtube %}sourceOrder.push("youtube");{% endif %}
+  {% if service_permissions.spotify %}sourceOrder.push("spotify");{% endif %}
   let activeSourceIndex = null;
   let homeSceneMain = null;
   let homeSceneUrl = null;
@@ -184,10 +210,10 @@
       panel.removeAttribute("aria-hidden");
     });
     if (clearLinks) {
-      main.querySelectorAll("#tiktok_video_url, #tiktok_url, #instagram_url, #youtube_url").forEach(input => {
+      main.querySelectorAll("#tiktok_video_url, #tiktok_url, #instagram_url, #youtube_url, #spotify_url").forEach(input => {
         input.value = "";
       });
-      main.querySelectorAll("[data-media-result], #youtube-result").forEach(result => {
+      main.querySelectorAll("[data-media-result], #youtube-result, #spotify-result").forEach(result => {
         result.hidden = true;
         result.classList.remove("revealing");
       });
@@ -196,6 +222,8 @@
       });
       const youtubeStatus = main.querySelector("#youtube-status");
       if (youtubeStatus) youtubeStatus.textContent = "Вставьте ссылку, превью загрузится автоматически.";
+      const spotifyStatus = main.querySelector("#spotify-status");
+      if (spotifyStatus) spotifyStatus.textContent = "Вставьте ссылку на отдельный трек. Для 320 кбит/с нужен Premium и cookies с sp_dc.";
     }
   }
   async function loadPostBuilder(postLink) {
@@ -297,10 +325,11 @@
     result.classList.add("revealing");
   }
   function applyCarouselPosition(item, offset) {
-    item.classList.remove("carousel-active", "carousel-left", "carousel-right");
+    item.classList.remove("carousel-active", "carousel-left", "carousel-right", "carousel-hidden");
     if (offset === 0) item.classList.add("carousel-active");
     if (offset === 1) item.classList.add("carousel-right");
     if (offset === sourceOrder.length - 1) item.classList.add("carousel-left");
+    if (offset > 1 && offset < sourceOrder.length - 1) item.classList.add("carousel-hidden");
   }
   function updateSourceCarousel(activeIndex) {
     document.querySelectorAll("[data-source-tab]").forEach(item => {
@@ -410,11 +439,109 @@
   }
   ["tiktok", "instagram"].forEach(source => { const input = document.getElementById(source === "tiktok" ? "tiktok_video_url" : "instagram_url"); if (!input) return; input.addEventListener("input", () => { clearTimeout(timers[source]); timers[source] = setTimeout(() => inspectMedia(source), 600); }); input.addEventListener("paste", () => { clearTimeout(timers[source]); timers[source] = setTimeout(() => inspectMedia(source), 50); }); });
 
+  function syncPreparedPostChat(panel) {
+    const picker = panel?.querySelector("[data-channel-picker] input[type=hidden]");
+    const postLink = panel?.querySelector("[data-media-post], #spotify-post");
+    if (!picker || !postLink?.href) return;
+    const url = new URL(postLink.href, window.location.href);
+    url.searchParams.set("chat_id", picker.value);
+    postLink.href = url.toString();
+  }
+  document.querySelectorAll("[data-channel-picker] input[type=hidden]").forEach(input => {
+    input.addEventListener("change", () => syncPreparedPostChat(input.closest(".source-panel")));
+  });
+  document.querySelectorAll("[data-media-post], #spotify-post").forEach(link => {
+    link.addEventListener("click", () => syncPreparedPostChat(link.closest(".source-panel")), true);
+  });
+
   const youtubeInput = document.getElementById("youtube_url"); let youtubeTimer;
   async function inspectYouTube() { const url = youtubeInput.value.trim(), status = document.getElementById("youtube-status"), result = document.getElementById("youtube-result"); if (!url) { result.hidden = true; result.classList.remove("revealing"); return; } status.textContent = "Получаю информацию о видео…"; result.hidden = true; result.classList.remove("revealing"); try { const response = await fetch("{{ url_for('youtube_info') }}", {method:"POST", body:new URLSearchParams({youtube_url:url})}); const data = await response.json(); if (!response.ok) throw new Error(data.error); document.getElementById("youtube-thumbnail").src=data.thumbnail_url; document.getElementById("youtube-title").textContent=data.title; document.getElementById("youtube-channel").textContent=data.channel; document.getElementById("youtube-thumbnail-download").href=data.thumbnail_download_url; document.getElementById("youtube-video-download").href=data.video_download_url; document.getElementById("youtube-post").href=data.post_url; status.textContent=""; revealResult(result); } catch(error) { status.textContent=error.message; } }
   if (youtubeInput) { youtubeInput.addEventListener("input", () => { clearTimeout(youtubeTimer); youtubeTimer=setTimeout(inspectYouTube,600); }); youtubeInput.addEventListener("paste", () => { clearTimeout(youtubeTimer); youtubeTimer=setTimeout(inspectYouTube,50); }); }
+
+  const spotifyInput = document.getElementById("spotify_url"); let spotifyTimer;
+  async function inspectSpotify() {
+    const url = spotifyInput.value.trim(), status = document.getElementById("spotify-status"), result = document.getElementById("spotify-result");
+    if (!url) { result.hidden = true; result.classList.remove("revealing"); status.textContent = "Вставьте ссылку на отдельный трек. Для 320 кбит/с нужен Premium и cookies с sp_dc."; return; }
+    status.textContent = "Получаю информацию о треке…"; result.hidden = true; result.classList.remove("revealing");
+    try {
+      const picker = spotifyInput.closest(".source-panel").querySelector("[data-channel-picker] input[type=hidden]");
+      const response = await fetch("{{ url_for('spotify_info') }}", {method:"POST", body:new URLSearchParams({spotify_url:url, chat_id:picker?.value || ""})});
+      const data = await response.json(); if (!response.ok) throw new Error(data.error || "Не удалось обработать Spotify-ссылку");
+      document.getElementById("spotify-thumbnail").src = data.thumbnail_url;
+      document.getElementById("spotify-title").textContent = data.title;
+      document.getElementById("spotify-artist").textContent = data.artist || "Исполнитель не указан";
+      const download = document.getElementById("spotify-audio-download");
+      download.href = data.audio_download_url;
+      download.dataset.filename = `${data.title}.mp3`;
+      document.getElementById("spotify-post").href = data.post_url;
+      status.textContent = "";
+      revealResult(result);
+    } catch(error) { status.textContent = error.message; }
+  }
+  if (spotifyInput) {
+    spotifyInput.addEventListener("input", () => { clearTimeout(spotifyTimer); spotifyTimer=setTimeout(inspectSpotify,600); });
+    spotifyInput.addEventListener("paste", () => { clearTimeout(spotifyTimer); spotifyTimer=setTimeout(inspectSpotify,50); });
+  }
+  document.getElementById("spotify-audio-download")?.addEventListener("click", async event => {
+    event.preventDefault();
+    const link = event.currentTarget;
+    const status = document.getElementById("spotify-status");
+    const label = link.querySelector("[data-download-label]");
+    if (!link.href) return;
+    link.setAttribute("aria-disabled", "true");
+    link.setAttribute("aria-busy", "true");
+    link.classList.add("download-progress-indeterminate");
+    label.textContent = "Подготавливаем MP3…";
+    status.textContent = "Загружаю трек и преобразую в MP3 320 кбит/с…";
+    try {
+      const response = await fetch(link.href);
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || "Не удалось скачать трек");
+      }
+      const total = Number(response.headers.get("Content-Length")) || 0;
+      let blob;
+      if (response.body && total) {
+        link.classList.remove("download-progress-indeterminate");
+        link.classList.add("download-progress-active");
+        const reader = response.body.getReader();
+        const chunks = [];
+        let loaded = 0;
+        while (true) {
+          const {done, value} = await reader.read();
+          if (done) break;
+          chunks.push(value);
+          loaded += value.byteLength;
+          const percent = Math.min(100, Math.round((loaded / total) * 100));
+          link.style.setProperty("--download-progress", `${percent}%`);
+          label.textContent = `Загрузка · ${percent}%`;
+        }
+        blob = new Blob(chunks, {type: response.headers.get("Content-Type") || "audio/mpeg"});
+      } else {
+        blob = await response.blob();
+      }
+      const blobUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = blobUrl;
+      anchor.download = link.dataset.filename || "spotify-track.mp3";
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(blobUrl);
+      label.textContent = "Готово · 100%";
+      status.textContent = "MP3 готов.";
+    } catch (error) {
+      status.textContent = error.message;
+    } finally {
+      link.removeAttribute("aria-disabled");
+      link.removeAttribute("aria-busy");
+      link.classList.remove("download-progress-active", "download-progress-indeterminate");
+      link.style.removeProperty("--download-progress");
+      window.setTimeout(() => { label.textContent = "Скачать MP3"; }, 900);
+    }
+  });
   document.addEventListener("click", event => {
-    const postLink = event.target.closest("[data-media-post], #youtube-post");
+    const postLink = event.target.closest("[data-media-post], #youtube-post, #spotify-post");
     if (!postLink || !postLink.getAttribute("href")) return;
     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
     event.preventDefault();

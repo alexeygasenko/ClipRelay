@@ -5,13 +5,18 @@ import http.cookiejar
 import json
 import logging
 import mimetypes
+import os
 import re
 import shutil
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 import uuid
 from dataclasses import dataclass
 from html.parser import HTMLParser
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -25,6 +30,7 @@ from app.storage import Storage, User
 LOGGER = logging.getLogger(__name__)
 MAX_CAPTION_LENGTH = 1024
 MAX_VIDEO_BYTES = 49 * 1024 * 1024
+STALE_DOWNLOAD_SECONDS = 24 * 60 * 60
 YOUTUBE_AUTH_COOKIE_NAMES = {
     "SID",
     "HSID",
@@ -39,6 +45,19 @@ INSTAGRAM_SHORTCODE_ALPHABET = (
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 )
 INSTAGRAM_GRAPHQL_DOC_ID = "8845758582119845"
+INSTAGRAM_URL_IN_TEXT_RE = re.compile(
+    r"https?://(?:www\.)?instagram\.com/[^\s<>]+",
+    flags=re.IGNORECASE,
+)
+SPOTIFY_TRACK_ID_RE = re.compile(r"^[A-Za-z0-9]{22}$")
+SPOTIFY_TRACK_URL_IN_TEXT_RE = re.compile(
+    r"https?://(?:open\.)?spotify\.com/[^\s<>]+",
+    flags=re.IGNORECASE,
+)
+TELEGRAM_DOWNLOAD_COMMAND_RE = re.compile(
+    r"^/(?P<command>spotify|instagram)(?:@[A-Za-z0-9_]+)?(?:\s|$)",
+    flags=re.IGNORECASE,
+)
 TELEGRAM_ALLOWED_TAGS = {
     "a",
     "b",
@@ -79,6 +98,15 @@ class YouTubeVideo:
     thumbnail_url: str
     duration: int
     channel: str
+
+
+@dataclass(frozen=True)
+class SpotifyTrack:
+    track_id: str
+    title: str
+    url: str
+    thumbnail_url: str
+    artist: str = ""
 
 
 class TelegramHTMLSanitizer(HTMLParser):
@@ -197,6 +225,15 @@ def is_instagram_url(url: str) -> bool:
         return False
 
 
+def instagram_url_from_text(text: str) -> str:
+    for match in INSTAGRAM_URL_IN_TEXT_RE.finditer(text or ""):
+        try:
+            return validate_instagram_url(match.group(0).rstrip(".,);]"))
+        except ValueError:
+            continue
+    raise ValueError("Добавьте ссылку на пост Instagram после команды /instagram")
+
+
 def validate_youtube_url(url: str) -> str:
     url = url.strip()
     parsed = urlparse(url)
@@ -206,6 +243,59 @@ def validate_youtube_url(url: str) -> str:
     ):
         raise ValueError("Нужна полная ссылка на видео YouTube")
     return url
+
+
+def validate_spotify_track_url(url: str) -> str:
+    url = url.strip()
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not (host == "spotify.com" or host.endswith(".spotify.com"))
+        or len(path_parts) < 2
+        or path_parts[-2] != "track"
+        or not SPOTIFY_TRACK_ID_RE.fullmatch(path_parts[-1])
+    ):
+        raise ValueError("Нужна полная ссылка на отдельный трек Spotify")
+    return f"https://open.spotify.com/track/{path_parts[-1]}"
+
+
+def spotify_track_id_from_url(url: str) -> str:
+    return urlparse(validate_spotify_track_url(url)).path.rstrip("/").split("/")[-1]
+
+
+def spotify_track_url_from_text(text: str) -> str:
+    for match in SPOTIFY_TRACK_URL_IN_TEXT_RE.finditer(text or ""):
+        try:
+            return validate_spotify_track_url(match.group(0).rstrip(".,);]"))
+        except ValueError:
+            continue
+    raise ValueError("Добавьте ссылку на отдельный трек Spotify после команды /spotify")
+
+
+def spotify_artist_from_embed_html(document: str) -> str:
+    match = re.search(
+        r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>',
+        document,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not match:
+        return ""
+    try:
+        payload = json.loads(match.group(1))
+        entity = payload["props"]["pageProps"]["state"]["data"]["entity"]
+    except (KeyError, TypeError, json.JSONDecodeError):
+        return ""
+    artists = entity.get("artists") if isinstance(entity, dict) else None
+    if not isinstance(artists, list):
+        return ""
+    names = [
+        str(artist.get("name") or "").strip()
+        for artist in artists
+        if isinstance(artist, dict)
+    ]
+    return ", ".join(name for name in names if name)
 
 
 def is_tiktok_photo_url(url: str) -> bool:
@@ -478,6 +568,18 @@ def has_youtube_auth_cookies(path: Path | None) -> bool:
     return False
 
 
+def has_spotify_auth_cookie(path: Path | None) -> bool:
+    if not path or not path.is_file():
+        return False
+    for line in path.read_text(encoding="utf-8-sig", errors="ignore").splitlines():
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) >= 7 and parts[5] == "sp_dc" and parts[6].strip():
+            return True
+    return False
+
+
 def build_caption(
     video: Video,
     quote_text: str | None = None,
@@ -564,6 +666,46 @@ def build_youtube_caption(
     return render([text[:low] for text in texts], truncated=True)
 
 
+def build_spotify_caption(
+    track: SpotifyTrack, before_text: str = "", after_text: str = ""
+) -> str:
+    track_url = html.escape(track.url, quote=True)
+    texts = [
+        before_text.strip(),
+        track.title.strip(),
+        track.artist.strip(),
+        after_text.strip(),
+    ]
+
+    def render(parts: list[str], truncated: bool = False) -> str:
+        before, title, artist, after = (
+            html.escape(part) + ("…" if truncated and part else "") for part in parts
+        )
+        sections: list[str] = []
+        if before:
+            sections.append(before)
+        sections.append(f'<a href="{track_url}">{title or "Открыть в Spotify"}</a>')
+        if artist:
+            sections.append(artist)
+        if after:
+            sections.append(after)
+        return "\n\n".join(sections)
+
+    caption = render(texts)
+    if len(caption) <= MAX_CAPTION_LENGTH:
+        return caption
+
+    low, high = 0, max(len(text) for text in texts)
+    while low < high:
+        middle = (low + high + 1) // 2
+        candidate = render([text[:middle] for text in texts], truncated=True)
+        if len(candidate) <= MAX_CAPTION_LENGTH:
+            low = middle
+        else:
+            high = middle - 1
+    return render([text[:low] for text in texts], truncated=True)
+
+
 def resolve_caption_html(
     caption_html: str | None = None,
     fallback: str = "",
@@ -579,9 +721,18 @@ class TikTokToTelegram:
         self.config.data_dir.mkdir(parents=True, exist_ok=True)
         self.download_dir = self.config.data_dir / "downloads"
         self.download_dir.mkdir(exist_ok=True)
-        for pattern in ("manual-*", "youtube-*"):
+        for pattern in ("manual-*", "youtube-*", "spotify-*"):
             for stale_file in self.download_dir.glob(pattern):
-                stale_file.unlink()
+                try:
+                    age_seconds = time.time() - stale_file.stat().st_mtime
+                except OSError:
+                    continue
+                if age_seconds < STALE_DOWNLOAD_SECONDS:
+                    continue
+                if stale_file.is_dir():
+                    shutil.rmtree(stale_file, ignore_errors=True)
+                else:
+                    stale_file.unlink(missing_ok=True)
         self.storage = Storage(self.config.data_dir / "state.sqlite3")
         configured_destinations = self.config.telegram_channels or (
             TelegramChannel(self.config.telegram_chat_id, self.config.telegram_chat_id),
@@ -614,6 +765,12 @@ class TikTokToTelegram:
         self.youtube_cookies_file = self._writable_cookie_copy(
             self.config.youtube_cookies_file, "youtube-cookies.txt", user_id=1
         )
+        self.spotify_cookies_file = self._writable_cookie_copy(
+            self.config.spotify_cookies_file, "spotify-cookies.txt", user_id=1
+        )
+        self.spotify_lock = threading.Lock()
+        self.telegram_commands_initialized: set[tuple[str, bool, bool]] = set()
+        self.telegram_poll_errors: set[str] = set()
 
     def _user_data_dir(self, user_id: int) -> Path:
         destination = self.config.data_dir / "users" / str(user_id)
@@ -642,6 +799,7 @@ class TikTokToTelegram:
             "tiktok": "tiktok-cookies.txt",
             "instagram": "instagram-cookies.txt",
             "youtube": "youtube-cookies.txt",
+            "spotify": "spotify-cookies.txt",
         }
         filename = filenames.get(service_name)
         if not filename:
@@ -736,6 +894,43 @@ class TikTokToTelegram:
                 user_id=user_id,
             )
 
+    def _save_telegram_chat(
+        self,
+        chat: dict[str, Any],
+        bot_token: str,
+        user_id: int,
+    ) -> TelegramChannel | None:
+        destination_type = str(chat.get("type") or "")
+        if (
+            destination_type not in {"channel", "group", "supergroup"}
+            or not chat.get("id")
+        ):
+            return None
+        numeric_chat_id = str(chat["id"])
+        username = str(chat.get("username") or "").strip().lstrip("@")
+        chat_id = f"@{username}" if username else numeric_chat_id
+        name = str(chat.get("title") or username or numeric_chat_id)
+        if username:
+            self.storage.canonicalize_telegram_destination(
+                numeric_chat_id,
+                name,
+                chat_id,
+                bot_token,
+                destination_type,
+                numeric_chat_id,
+                user_id=user_id,
+            )
+        else:
+            self.storage.add_telegram_destination(
+                name,
+                chat_id,
+                bot_token,
+                destination_type=destination_type,
+                telegram_id=numeric_chat_id,
+                user_id=user_id,
+            )
+        return TelegramChannel(name, chat_id, destination_type)
+
     def discover_telegram_destinations(
         self, bot_token: str, user_id: int = 1
     ) -> tuple[TelegramChannel, ...]:
@@ -775,37 +970,409 @@ class TikTokToTelegram:
                 chat = {**chat, **self._telegram_chat(bot_token, numeric_chat_id)}
             except ValueError:
                 LOGGER.warning("Could not refresh Telegram chat %s", numeric_chat_id)
-            username = str(chat.get("username") or "").strip().lstrip("@")
-            chat_id = f"@{username}" if username else numeric_chat_id
-            name = str(chat.get("title") or username or numeric_chat_id)
-            telegram_id = str(chat.get("id") or numeric_chat_id)
-            if username:
-                self.storage.canonicalize_telegram_destination(
-                    numeric_chat_id,
-                    name,
-                    chat_id,
-                    bot_token,
-                    destination_type,
-                    telegram_id,
-                    user_id=user_id,
-                )
-            found[chat_id] = TelegramChannel(name, chat_id, destination_type)
+            channel = self._save_telegram_chat(chat, bot_token, user_id)
+            if channel:
+                found[channel.chat_id] = channel
         if not found:
             raise ValueError(
                 "Каналы не найдены. Добавьте бота администратором и опубликуйте новый пост."
             )
-        for channel in found.values():
-            if channel.chat_id.startswith("@"):
-                continue
-            self.storage.add_telegram_destination(
-                channel.name,
-                channel.chat_id,
-                bot_token,
-                destination_type=channel.destination_type,
-                telegram_id=channel.chat_id if channel.chat_id.startswith("-") else None,
-                user_id=user_id,
-            )
         return tuple(found.values())
+
+    @staticmethod
+    def _telegram_command_offset_key(bot_token: str) -> str:
+        bot_id = bot_token.partition(":")[0]
+        return f"telegram_spotify_offset_{bot_id}"
+
+    def _telegram_bot_owners(self) -> dict[str, int]:
+        owners: dict[str, int] = {}
+        for user in self.storage.active_users():
+            if not (user.allow_spotify or user.allow_instagram):
+                continue
+            for destination in self.storage.telegram_destinations(user.id):
+                token = destination.bot_token.strip()
+                if token:
+                    owners.setdefault(token, user.id)
+        return owners
+
+    def _ensure_telegram_commands(self, bot_token: str, user_id: int) -> None:
+        user = self.storage.get_user(user_id)
+        command_state = (
+            bot_token,
+            user.allow_spotify,
+            user.allow_instagram,
+        )
+        if command_state in self.telegram_commands_initialized:
+            return
+        commands = []
+        if user.allow_spotify:
+            commands.append(
+                {
+                    "command": "spotify",
+                    "description": "Скачать трек по ссылке Spotify",
+                }
+            )
+        if user.allow_instagram:
+            commands.append(
+                {
+                    "command": "instagram",
+                    "description": "Скачать пост по ссылке Instagram",
+                }
+            )
+        response = requests.post(
+            f"https://api.telegram.org/bot{bot_token}/setMyCommands",
+            data={
+                "commands": json.dumps(
+                    commands,
+                    ensure_ascii=False,
+                )
+            },
+            timeout=30,
+        )
+        payload = response.json()
+        if not payload.get("ok"):
+            raise ValueError("Telegram не разрешил настроить команды бота")
+        self.telegram_commands_initialized = {
+            state
+            for state in self.telegram_commands_initialized
+            if state[0] != bot_token
+        }
+        self.telegram_commands_initialized.add(command_state)
+
+    def _telegram_chat_is_registered(
+        self,
+        chat: dict[str, Any],
+        bot_token: str,
+        user_id: int,
+    ) -> bool:
+        numeric_chat_id = str(chat.get("id") or "")
+        username = str(chat.get("username") or "").strip().lstrip("@")
+        public_chat_id = f"@{username}" if username else ""
+        return any(
+            destination.bot_token == bot_token
+            and (
+                destination.chat_id in {numeric_chat_id, public_chat_id}
+                or destination.telegram_id == numeric_chat_id
+            )
+            for destination in self.storage.telegram_destinations(user_id)
+        )
+
+    def _telegram_sender_can_register_chat(
+        self,
+        message: dict[str, Any],
+        bot_token: str,
+    ) -> bool:
+        chat = message.get("chat") or {}
+        destination_type = str(chat.get("type") or "")
+        if destination_type == "private" or destination_type == "channel":
+            return True
+        sender_chat = message.get("sender_chat") or {}
+        if sender_chat.get("id") == chat.get("id"):
+            return True
+        sender = message.get("from") or {}
+        if not sender.get("id") or not chat.get("id"):
+            return False
+        try:
+            response = requests.get(
+                f"https://api.telegram.org/bot{bot_token}/getChatMember",
+                params={"chat_id": chat["id"], "user_id": sender["id"]},
+                timeout=30,
+            )
+            payload = response.json()
+        except (requests.RequestException, requests.JSONDecodeError):
+            return False
+        status = str((payload.get("result") or {}).get("status") or "")
+        return bool(payload.get("ok")) and status in {"administrator", "creator"}
+
+    @staticmethod
+    def _telegram_message_text(message: dict[str, Any]) -> str:
+        return str(message.get("text") or message.get("caption") or "")
+
+    def _telegram_send_text(
+        self,
+        bot_token: str,
+        chat_id: str,
+        text: str,
+        message_thread_id: int | None = None,
+    ) -> int | None:
+        data: dict[str, Any] = {"chat_id": chat_id, "text": text}
+        if message_thread_id:
+            data["message_thread_id"] = message_thread_id
+        response = requests.post(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            data=data,
+            timeout=60,
+        )
+        payload = response.json()
+        if not payload.get("ok"):
+            raise RuntimeError(f"Telegram API error: {payload}")
+        message_id = (payload.get("result") or {}).get("message_id")
+        return int(message_id) if message_id is not None else None
+
+    @staticmethod
+    def _telegram_finish_status(
+        bot_token: str,
+        chat_id: str,
+        message_id: int | None,
+        error: str | None = None,
+        error_prefix: str = "Не удалось скачать трек",
+    ) -> None:
+        if message_id is None:
+            return
+        method = "editMessageText" if error else "deleteMessage"
+        data: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+        }
+        if error:
+            data["text"] = f"{error_prefix}: {error}"[:4096]
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{bot_token}/{method}",
+                data=data,
+                timeout=30,
+            )
+        except requests.RequestException:
+            LOGGER.info("Could not finish Telegram command status message")
+
+    def process_telegram_update(
+        self,
+        update: dict[str, Any],
+        bot_token: str,
+        user_id: int,
+    ) -> None:
+        membership = update.get("my_chat_member") or {}
+        if membership:
+            status = str(
+                ((membership.get("new_chat_member") or {}).get("status") or "")
+            )
+            if status in {"member", "administrator", "creator"}:
+                self._save_telegram_chat(
+                    dict(membership.get("chat") or {}),
+                    bot_token,
+                    user_id,
+                )
+            return
+
+        message = update.get("message") or update.get("channel_post") or {}
+        text = self._telegram_message_text(message)
+        command_match = TELEGRAM_DOWNLOAD_COMMAND_RE.match(text.strip())
+        if not command_match:
+            return
+        command = command_match.group("command").lower()
+        chat = dict(message.get("chat") or {})
+        if not chat.get("id"):
+            return
+        chat_id = str(chat["id"])
+        message_thread_id = message.get("message_thread_id")
+        registered = self._telegram_chat_is_registered(chat, bot_token, user_id)
+        if not registered:
+            if not self._telegram_sender_can_register_chat(message, bot_token):
+                self._telegram_send_text(
+                    bot_token,
+                    chat_id,
+                    f"Первую команду /{command} в новом чате должен отправить администратор.",
+                    message_thread_id,
+                )
+                return
+            if str(chat.get("type") or "") in {"channel", "group", "supergroup"}:
+                self._save_telegram_chat(chat, bot_token, user_id)
+
+        reply = message.get("reply_to_message") or {}
+        link_source = "\n".join(
+            part
+            for part in (
+                text,
+                self._telegram_message_text(reply),
+            )
+            if part
+        )
+
+        if command == "instagram":
+            self._process_telegram_instagram_command(
+                link_source,
+                bot_token,
+                chat_id,
+                user_id,
+                message_thread_id,
+            )
+            return
+        self._process_telegram_spotify_command(
+            link_source,
+            bot_token,
+            chat_id,
+            user_id,
+            message_thread_id,
+        )
+
+    def _process_telegram_spotify_command(
+        self,
+        link_source: str,
+        bot_token: str,
+        chat_id: str,
+        user_id: int,
+        message_thread_id: int | None,
+    ) -> None:
+        try:
+            spotify_url = spotify_track_url_from_text(link_source)
+        except ValueError as error:
+            self._telegram_send_text(
+                bot_token,
+                chat_id,
+                str(error),
+                message_thread_id,
+            )
+            return
+
+        status_message_id = self._telegram_send_text(
+            bot_token,
+            chat_id,
+            "Готовлю MP3 320 кбит/с…",
+            message_thread_id,
+        )
+        try:
+            track = self.get_spotify_info(spotify_url, user_id)
+            path = self.download_spotify(
+                track,
+                f"spotify-{user_id}-{track.track_id}",
+                user_id,
+            )
+            self._publish_spotify_to_telegram(
+                track,
+                path,
+                bot_token,
+                chat_id,
+                caption_html=None,
+                message_thread_id=message_thread_id,
+            )
+        except Exception as error:
+            LOGGER.exception(
+                "Failed to process Telegram Spotify command for user %s",
+                user_id,
+            )
+            self._telegram_finish_status(
+                bot_token,
+                chat_id,
+                status_message_id,
+                str(error),
+            )
+            return
+        self._telegram_finish_status(
+            bot_token,
+            chat_id,
+            status_message_id,
+        )
+
+    def _process_telegram_instagram_command(
+        self,
+        link_source: str,
+        bot_token: str,
+        chat_id: str,
+        user_id: int,
+        message_thread_id: int | None,
+    ) -> None:
+        try:
+            instagram_url = instagram_url_from_text(link_source)
+        except ValueError as error:
+            self._telegram_send_text(
+                bot_token,
+                chat_id,
+                str(error),
+                message_thread_id,
+            )
+            return
+
+        status_message_id = self._telegram_send_text(
+            bot_token,
+            chat_id,
+            "Скачиваю Instagram-пост…",
+            message_thread_id,
+        )
+        paths: tuple[Path, ...] = ()
+        try:
+            video, paths = self.prepare_url(instagram_url, user_id)
+            caption = resolve_caption_html(None, build_caption(video))
+            self._publish_media_to_telegram(
+                video,
+                paths,
+                bot_token,
+                chat_id,
+                caption,
+                message_thread_id=message_thread_id,
+            )
+        except Exception as error:
+            LOGGER.exception(
+                "Failed to process Telegram Instagram command for user %s",
+                user_id,
+            )
+            self._telegram_finish_status(
+                bot_token,
+                chat_id,
+                status_message_id,
+                str(error),
+                "Не удалось скачать Instagram-пост",
+            )
+            return
+        finally:
+            for path in paths:
+                path.unlink(missing_ok=True)
+        self._telegram_finish_status(
+            bot_token,
+            chat_id,
+            status_message_id,
+        )
+
+    def poll_telegram_commands_once(self) -> int:
+        owners = self._telegram_bot_owners()
+        for bot_token, user_id in owners.items():
+            try:
+                self._ensure_telegram_commands(bot_token, user_id)
+                offset_key = self._telegram_command_offset_key(bot_token)
+                offset = int(self.storage.setting(offset_key, "0", user_id))
+                response = requests.get(
+                    f"https://api.telegram.org/bot{bot_token}/getUpdates",
+                    params={
+                        "offset": offset,
+                        "limit": 100,
+                        "timeout": 0,
+                        "allowed_updates": json.dumps(
+                            ["message", "channel_post", "my_chat_member"]
+                        ),
+                    },
+                    timeout=30,
+                )
+                payload = response.json()
+                if not payload.get("ok"):
+                    raise ValueError(
+                        "Telegram не разрешил polling. Проверьте, что webhook отключён."
+                    )
+                for update in payload.get("result") or []:
+                    update_id = int(update.get("update_id") or 0)
+                    try:
+                        self.process_telegram_update(update, bot_token, user_id)
+                    except Exception:
+                        LOGGER.exception(
+                            "Failed to process Telegram update for user %s",
+                            user_id,
+                        )
+                    finally:
+                        if update_id:
+                            offset = max(offset, update_id + 1)
+                            self.storage.set_setting(
+                                offset_key,
+                                str(offset),
+                                user_id=user_id,
+                            )
+                self.telegram_poll_errors.discard(bot_token)
+            except Exception as error:
+                if bot_token not in self.telegram_poll_errors:
+                    LOGGER.warning(
+                        "Telegram command polling failed for user %s: %s",
+                        user_id,
+                        error,
+                    )
+                    self.telegram_poll_errors.add(bot_token)
+        return len(owners)
 
     def monitored_tiktok_channels(self, user_id: int = 1) -> tuple[str, ...]:
         return self.storage.monitored_tiktok_channels(user_id)
@@ -842,10 +1409,19 @@ class TikTokToTelegram:
         elif service_name == "youtube":
             destination = self._user_data_dir(user_id) / "youtube-cookies.txt"
             attribute = "youtube_cookies_file"
+        elif service_name == "spotify":
+            destination = self._user_data_dir(user_id) / "spotify-cookies.txt"
+            attribute = "spotify_cookies_file"
         else:
             raise ValueError("Неизвестный сервис cookies")
         temporary = destination.with_suffix(".tmp")
         temporary.write_bytes(content)
+        if service_name == "spotify" and not has_spotify_auth_cookie(temporary):
+            temporary.unlink(missing_ok=True)
+            raise ValueError(
+                "В Spotify cookies не найден sp_dc. Экспортируйте cookies.txt "
+                "с open.spotify.com после входа в аккаунт."
+            )
         temporary.replace(destination)
         if user_id == 1:
             setattr(self, attribute, destination)
@@ -1267,6 +1843,241 @@ class TikTokToTelegram:
                 partial_file.unlink()
             raise
 
+    def get_spotify_info(self, url: str, user_id: int = 1) -> SpotifyTrack:
+        self.ensure_service_allowed("spotify", user_id)
+        url = validate_spotify_track_url(url)
+        track_id = spotify_track_id_from_url(url)
+        response = requests.get(
+            "https://open.spotify.com/oembed",
+            params={"url": url},
+            timeout=30,
+        )
+        response.raise_for_status()
+        try:
+            payload = response.json()
+        except requests.JSONDecodeError as error:
+            raise ValueError("Spotify не вернул информацию о треке") from error
+        title = str(payload.get("title") or "").strip()
+        thumbnail_url = str(payload.get("thumbnail_url") or "").strip()
+        if not title or not thumbnail_url:
+            raise ValueError("Spotify не вернул название или обложку трека")
+        artist = ""
+        try:
+            embed_response = requests.get(
+                f"https://open.spotify.com/embed/track/{track_id}",
+                timeout=30,
+            )
+            embed_response.raise_for_status()
+            artist = spotify_artist_from_embed_html(embed_response.text)
+        except requests.RequestException as error:
+            LOGGER.info("Could not load Spotify artist for %s: %s", track_id, error)
+        return SpotifyTrack(
+            track_id=track_id,
+            title=title,
+            url=url,
+            thumbnail_url=thumbnail_url,
+            artist=artist,
+        )
+
+    @staticmethod
+    def _spotify_download_error(output: str) -> ValueError:
+        normalized = output.lower()
+        if (
+            "sp_dc" in normalized
+            or "could not authenticate" in normalized
+            or "bad credentials" in normalized
+        ):
+            return ValueError(
+                "Spotify cookies недействительны или устарели. "
+                "Загрузите новый cookies.txt из авторизованной сессии."
+            )
+        if "no reachable spotify access point" in normalized:
+            return ValueError(
+                "Не удалось подключиться к аудиосерверам Spotify. "
+                "Повторите попытку через несколько секунд."
+            )
+        if (
+            "format not available" in normalized
+            or "media format" in normalized
+            or "vorbis-high" in normalized
+            or "very_high" in normalized
+        ):
+            return ValueError(
+                "Spotify не отдал поток 320 кбит/с. Для прямой загрузки "
+                "в этом качестве нужен активный Premium-аккаунт."
+            )
+        return ValueError(
+            "Не удалось скачать трек напрямую из Spotify. "
+            "Проверьте cookies и активность Premium-подписки."
+        )
+
+    def download_spotify(
+        self, track: SpotifyTrack, output_id: str, user_id: int = 1
+    ) -> Path:
+        self.ensure_service_allowed("spotify", user_id)
+        cookies_file = self._cookie_file("spotify", user_id)
+        if not has_spotify_auth_cookie(cookies_file):
+            raise ValueError(
+                "Сначала загрузите Spotify cookies.txt в настройках. "
+                "В файле должен быть cookie sp_dc с open.spotify.com."
+            )
+
+        target = self.download_dir / f"{output_id}.mp3"
+        with self.spotify_lock:
+            if target.is_file():
+                return target
+            with tempfile.TemporaryDirectory(
+                prefix=f"spotify-{output_id}-", dir=self.download_dir
+            ) as temporary_dir:
+                work_dir = Path(temporary_dir)
+                session_file = work_dir / "session.json"
+                source = work_dir / "source.ogg"
+                auth_command = [
+                    sys.executable,
+                    "-m",
+                    "app.spotify_auth",
+                    str(cookies_file),
+                    str(session_file),
+                ]
+                try:
+                    auth_result = subprocess.run(
+                        auth_command,
+                        capture_output=True,
+                        text=True,
+                        timeout=2 * 60,
+                        check=False,
+                    )
+                except subprocess.TimeoutExpired as error:
+                    raise ValueError(
+                        "Spotify не успел подтвердить авторизацию за 2 минуты"
+                    ) from error
+                auth_output = (
+                    f"{auth_result.stdout}\n{auth_result.stderr}".strip()
+                )
+                if auth_result.returncode != 0 or not session_file.is_file():
+                    LOGGER.warning("Spotify authorization failed: %s", auth_output)
+                    raise self._spotify_download_error(auth_output)
+                try:
+                    session_payload = json.loads(
+                        session_file.read_text(encoding="utf-8")
+                    )
+                except (json.JSONDecodeError, OSError) as error:
+                    raise ValueError(
+                        "Spotify вернул повреждённые данные сессии"
+                    ) from error
+                if not session_payload.get("premium"):
+                    raise ValueError(
+                        "Для прямого потока 320 кбит/с нужен активный "
+                        "Spotify Premium."
+                    )
+
+                player_python = (
+                    os.getenv("SPOTIFY_PLAYER_PYTHON", "").strip()
+                    or sys.executable
+                )
+                player_command = [
+                    player_python,
+                    "-m",
+                    "app.spotify_player",
+                    str(session_file),
+                    track.track_id,
+                    str(source),
+                ]
+                try:
+                    result = subprocess.run(
+                        player_command,
+                        capture_output=True,
+                        text=True,
+                        timeout=15 * 60,
+                        check=False,
+                    )
+                except subprocess.TimeoutExpired as error:
+                    raise ValueError(
+                        "Spotify не успел подготовить трек за 15 минут"
+                    ) from error
+                except OSError as error:
+                    raise ValueError(
+                        "Python-плеер Spotify не установлен"
+                    ) from error
+                output = f"{result.stdout}\n{result.stderr}".strip()
+                if result.returncode != 0 or not source.is_file():
+                    LOGGER.warning("Spotify player failed: %s", output)
+                    raise self._spotify_download_error(output)
+
+                cover = None
+                if track.thumbnail_url:
+                    try:
+                        response = requests.get(track.thumbnail_url, timeout=30)
+                        response.raise_for_status()
+                        if (
+                            response.headers.get("Content-Type", "").startswith(
+                                "image/"
+                            )
+                            and len(response.content) <= 10 * 1024 * 1024
+                        ):
+                            cover = work_dir / "cover.jpg"
+                            cover.write_bytes(response.content)
+                    except (requests.RequestException, OSError):
+                        LOGGER.warning(
+                            "Could not download Spotify cover for %s",
+                            track.track_id,
+                        )
+                ffmpeg_command = [
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-i",
+                    str(source),
+                ]
+                if cover:
+                    ffmpeg_command.extend(["-i", str(cover)])
+                ffmpeg_command.extend(["-map", "0:a:0"])
+                if cover:
+                    ffmpeg_command.extend(
+                        [
+                            "-map",
+                            "1:v:0",
+                            "-c:v",
+                            "mjpeg",
+                            "-disposition:v:0",
+                            "attached_pic",
+                            "-metadata:s:v",
+                            "title=Album cover",
+                            "-metadata:s:v",
+                            "comment=Cover (front)",
+                        ]
+                    )
+                ffmpeg_command.extend(
+                    [
+                        "-map_metadata",
+                        "0",
+                        "-metadata",
+                        f"title={track.title}",
+                        "-metadata",
+                        f"artist={track.artist}",
+                        "-c:a",
+                        "libmp3lame",
+                        "-b:a",
+                        "320k",
+                        "-id3v2_version",
+                        "3",
+                        str(target),
+                    ]
+                )
+                conversion = subprocess.run(
+                    ffmpeg_command,
+                    capture_output=True,
+                    text=True,
+                    timeout=5 * 60,
+                    check=False,
+                )
+                if conversion.returncode != 0 or not target.is_file():
+                    target.unlink(missing_ok=True)
+                    raise ValueError("Не удалось преобразовать трек Spotify в MP3")
+        return target
+
     def get_youtube_info(self, url: str, user_id: int = 1) -> YouTubeVideo:
         self.ensure_service_allowed("youtube", user_id)
         url = validate_youtube_url(url)
@@ -1429,21 +2240,41 @@ class TikTokToTelegram:
             include_description,
         )
         caption = resolve_caption_html(caption_html, fallback_caption)
+        self._publish_media_to_telegram(
+            video,
+            path,
+            target.bot_token,
+            target.chat_id,
+            caption,
+        )
+
+    def _publish_media_to_telegram(
+        self,
+        video: Video,
+        path: Path | tuple[Path, ...],
+        bot_token: str,
+        chat_id: str,
+        caption: str,
+        message_thread_id: int | None = None,
+    ) -> None:
         paths = (path,) if isinstance(path, Path) else path
         if not paths:
             raise ValueError("Медиафайлы не найдены")
 
         if video.media_type == "image":
             if len(paths) == 1:
-                url = f"https://api.telegram.org/bot{target.bot_token}/sendPhoto"
+                url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
+                photo_data: dict[str, Any] = {
+                    "chat_id": chat_id,
+                    "caption": caption,
+                    "parse_mode": "HTML",
+                }
+                if message_thread_id:
+                    photo_data["message_thread_id"] = message_thread_id
                 with paths[0].open("rb") as photo_file:
                     response = requests.post(
                         url,
-                        data={
-                            "chat_id": target.chat_id,
-                            "caption": caption,
-                            "parse_mode": "HTML",
-                        },
+                        data=photo_data,
                         files={"photo": (paths[0].name, photo_file, "image/jpeg")},
                         timeout=180,
                     )
@@ -1453,7 +2284,7 @@ class TikTokToTelegram:
                     raise RuntimeError(f"Telegram API error: {payload}")
                 return
 
-            url = f"https://api.telegram.org/bot{target.bot_token}/sendMediaGroup"
+            url = f"https://api.telegram.org/bot{bot_token}/sendMediaGroup"
             first_chunk = True
             for chunk_start in range(0, len(paths), 10):
                 chunk = paths[chunk_start : chunk_start + 10]
@@ -1474,9 +2305,15 @@ class TikTokToTelegram:
                             item["caption"] = caption
                             item["parse_mode"] = "HTML"
                         media.append(item)
+                    media_data: dict[str, Any] = {
+                        "chat_id": chat_id,
+                        "media": json.dumps(media),
+                    }
+                    if message_thread_id:
+                        media_data["message_thread_id"] = message_thread_id
                     response = requests.post(
                         url,
-                        data={"chat_id": target.chat_id, "media": json.dumps(media)},
+                        data=media_data,
                         files=files,
                         timeout=180,
                     )
@@ -1491,16 +2328,19 @@ class TikTokToTelegram:
             return
 
         video_path = paths[0]
-        url = f"https://api.telegram.org/bot{target.bot_token}/sendVideo"
+        url = f"https://api.telegram.org/bot{bot_token}/sendVideo"
+        video_data: dict[str, Any] = {
+            "chat_id": chat_id,
+            "caption": caption,
+            "parse_mode": "HTML",
+            "supports_streaming": "true",
+        }
+        if message_thread_id:
+            video_data["message_thread_id"] = message_thread_id
         with video_path.open("rb") as video_file:
             response = requests.post(
                 url,
-                data={
-                    "chat_id": target.chat_id,
-                    "caption": caption,
-                    "parse_mode": "HTML",
-                    "supports_streaming": "true",
-                },
+                data=video_data,
                 files={"video": (video_path.name, video_file, "video/mp4")},
                 timeout=180,
             )
@@ -1533,6 +2373,113 @@ class TikTokToTelegram:
             },
             timeout=60,
         )
+        response.raise_for_status()
+        payload = response.json()
+        if not payload.get("ok"):
+            raise RuntimeError(f"Telegram API error: {payload}")
+
+    def publish_spotify(
+        self,
+        track: SpotifyTrack,
+        path: Path,
+        before_text: str = "",
+        after_text: str = "",
+        chat_id: str | None = None,
+        caption_html: str | None = None,
+        user_id: int = 1,
+    ) -> None:
+        self.ensure_service_allowed("spotify", user_id)
+        target = self.storage.telegram_destination(chat_id, user_id)
+        self._publish_spotify_to_telegram(
+            track,
+            path,
+            target.bot_token,
+            target.chat_id,
+            before_text=before_text,
+            after_text=after_text,
+            caption_html=caption_html,
+        )
+
+    def _publish_spotify_to_telegram(
+        self,
+        track: SpotifyTrack,
+        path: Path,
+        bot_token: str,
+        chat_id: str,
+        before_text: str = "",
+        after_text: str = "",
+        caption_html: str | None = None,
+        message_thread_id: int | None = None,
+    ) -> None:
+        caption = resolve_caption_html(
+            caption_html,
+            build_spotify_caption(track, before_text, after_text),
+        )
+        cover_content = None
+        if track.thumbnail_url:
+            try:
+                thumbnail_response = requests.get(track.thumbnail_url, timeout=30)
+                thumbnail_response.raise_for_status()
+                content_type = thumbnail_response.headers.get("Content-Type", "")
+                if (
+                    content_type.startswith("image/jpeg")
+                    and len(thumbnail_response.content) <= 200 * 1024
+                ):
+                    cover_content = thumbnail_response.content
+            except requests.RequestException as error:
+                LOGGER.info(
+                    "Could not attach Spotify cover for %s: %s",
+                    track.track_id,
+                    error,
+                )
+
+        if cover_content:
+            photo_url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
+            photo_data: dict[str, Any] = {
+                "chat_id": chat_id,
+                "caption": caption,
+                "parse_mode": "HTML",
+            }
+            if message_thread_id:
+                photo_data["message_thread_id"] = message_thread_id
+            with BytesIO(cover_content) as photo_file:
+                photo_response = requests.post(
+                    photo_url,
+                    data=photo_data,
+                    files={"photo": ("cover.jpg", photo_file, "image/jpeg")},
+                    timeout=60,
+                )
+            photo_response.raise_for_status()
+            photo_payload = photo_response.json()
+            if not photo_payload.get("ok"):
+                raise RuntimeError(f"Telegram API error: {photo_payload}")
+
+        audio_url = f"https://api.telegram.org/bot{bot_token}/sendAudio"
+        thumbnail_file = BytesIO(cover_content) if cover_content else None
+        files: dict[str, tuple[str, Any, str]] = {}
+        if thumbnail_file:
+            files["thumbnail"] = ("cover.jpg", thumbnail_file, "image/jpeg")
+        audio_data: dict[str, Any] = {
+            "chat_id": chat_id,
+            "caption": "" if cover_content else caption,
+            "parse_mode": "HTML",
+            "title": track.title,
+            "performer": track.artist,
+        }
+        if message_thread_id:
+            audio_data["message_thread_id"] = message_thread_id
+        with path.open("rb") as audio_file:
+            files["audio"] = (path.name, audio_file, "audio/mpeg")
+            try:
+                response = requests.post(
+                    audio_url,
+                    data=audio_data,
+                    files=files,
+                    timeout=300,
+                )
+            finally:
+                if thumbnail_file:
+                    thumbnail_file.close()
         response.raise_for_status()
         payload = response.json()
         if not payload.get("ok"):
@@ -1586,3 +2533,9 @@ class TikTokToTelegram:
                             user.username,
                         )
             time.sleep(sleep_seconds)
+
+    def run_telegram_commands_forever(self) -> None:
+        LOGGER.info("Telegram command monitor started")
+        while True:
+            bot_count = self.poll_telegram_commands_once()
+            time.sleep(2 if bot_count else 10)

@@ -1,16 +1,21 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from app.config import Config, TelegramChannel
 from app.service import (
+    SpotifyTrack,
     TikTokToTelegram,
     Video,
     YouTubeVideo,
     best_thumbnail_url,
+    build_spotify_caption,
     build_youtube_caption,
     has_youtube_auth_cookies,
+    has_spotify_auth_cookie,
+    instagram_url_from_text,
     instagram_image_post_from_media,
     instagram_shortcode_to_media_id,
     build_caption,
@@ -20,13 +25,36 @@ from app.service import (
     username_from_info,
     validate_tiktok_url,
     validate_youtube_url,
+    validate_spotify_track_url,
     is_tiktok_video_url,
     is_tiktok_photo_url,
     is_instagram_url,
     validate_instagram_url,
     sanitize_telegram_html,
+    spotify_artist_from_embed_html,
+    spotify_track_url_from_text,
     tiktok_image_post_urls_from_data,
 )
+
+
+def make_service_config(tmp_path: Path) -> Config:
+    return Config(
+        telegram_bot_token="token",
+        telegram_chat_id="@main",
+        tiktok_channels=(),
+        poll_interval_seconds=300,
+        scan_limit=15,
+        post_existing=False,
+        data_dir=tmp_path,
+        cookies_file=None,
+        instagram_cookies_file=None,
+        youtube_cookies_file=None,
+        youtube_po_token_provider_url=None,
+        web_host="127.0.0.1",
+        web_port=8080,
+        web_username=None,
+        web_password=None,
+    )
 
 
 def test_normalize_channel() -> None:
@@ -324,6 +352,43 @@ def test_manual_instagram_url_must_be_instagram() -> None:
     assert not is_instagram_url("https://example.com/video")
 
 
+def test_spotify_track_url_is_validated_and_normalized() -> None:
+    track_id = "4uLU6hMCjMI75M1A2tKUQC"
+    assert validate_spotify_track_url(
+        f"https://spotify.com/intl-de/track/{track_id}?si=test"
+    ) == f"https://open.spotify.com/track/{track_id}"
+    with pytest.raises(ValueError):
+        validate_spotify_track_url("https://open.spotify.com/album/invalid")
+    with pytest.raises(ValueError):
+        validate_spotify_track_url("https://example.com/track/4uLU6hMCjMI75M1A2tKUQC")
+
+
+def test_spotify_artist_is_read_from_embed_metadata() -> None:
+    document = (
+        '<script id="__NEXT_DATA__" type="application/json">'
+        '{"props":{"pageProps":{"state":{"data":{"entity":{"artists":'
+        '[{"name":"First Artist"},{"name":"Second Artist"}]}}}}}}</script>'
+    )
+
+    assert spotify_artist_from_embed_html(document) == "First Artist, Second Artist"
+
+
+def test_build_spotify_caption_links_track_and_artist() -> None:
+    track = SpotifyTrack(
+        "4uLU6hMCjMI75M1A2tKUQC",
+        "Track",
+        "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC",
+        "https://i.scdn.co/image/test.jpg",
+        "Artist",
+    )
+
+    assert build_spotify_caption(track, "Before", "After") == (
+        "Before\n\n"
+        '<a href="https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC">Track</a>'
+        "\n\nArtist\n\nAfter"
+    )
+
+
 def test_best_thumbnail_uses_largest_resolution() -> None:
     info = {
         "thumbnail": "fallback",
@@ -371,6 +436,16 @@ def test_detects_youtube_auth_cookies(tmp_path) -> None:
         encoding="utf-8",
     )
     assert has_youtube_auth_cookies(cookies)
+
+
+def test_detects_spotify_auth_cookie(tmp_path) -> None:
+    cookies = tmp_path / "cookies.txt"
+    cookies.write_text(
+        "# Netscape HTTP Cookie File\n"
+        ".spotify.com\tTRUE\t/\tTRUE\t0\tsp_dc\tsecret\n",
+        encoding="utf-8",
+    )
+    assert has_spotify_auth_cookie(cookies)
 
 
 def test_publish_youtube_sends_photo_to_selected_channel(tmp_path, monkeypatch) -> None:
@@ -427,6 +502,411 @@ def test_publish_youtube_sends_photo_to_selected_channel(tmp_path, monkeypatch) 
     assert captured["data"]["chat_id"] == "@second"
     assert captured["data"]["photo"] == video.thumbnail_url
     assert captured["data"]["caption"] == "<b>Custom</b>"
+
+
+def test_publish_spotify_sends_mp3_to_selected_channel(tmp_path, monkeypatch) -> None:
+    config = Config(
+        telegram_bot_token="token",
+        telegram_chat_id="@main",
+        tiktok_channels=(),
+        poll_interval_seconds=300,
+        scan_limit=15,
+        post_existing=False,
+        data_dir=tmp_path,
+        cookies_file=None,
+        instagram_cookies_file=None,
+        youtube_cookies_file=None,
+        youtube_po_token_provider_url=None,
+        web_host="127.0.0.1",
+        web_port=8080,
+        web_username=None,
+        web_password=None,
+        telegram_channels=(
+            TelegramChannel("Main", "@main"),
+            TelegramChannel("Second", "@second"),
+        ),
+    )
+    captured = []
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"ok": True}
+
+    def fake_post(url, data, files, timeout):
+        captured.append(
+            {
+                "url": url,
+                "data": dict(data),
+                "files": set(files),
+                "timeout": timeout,
+            }
+        )
+        return Response()
+
+    class CoverResponse:
+        headers = {"Content-Type": "image/jpeg"}
+        content = b"jpg"
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr("app.service.requests.post", fake_post)
+    monkeypatch.setattr(
+        "app.service.requests.get", lambda *args, **kwargs: CoverResponse()
+    )
+    service = TikTokToTelegram(config)
+    service.storage.add_telegram_destination("Second", "@second", "second-token")
+    audio = tmp_path / "track.mp3"
+    audio.write_bytes(b"mp3")
+    track = SpotifyTrack(
+        "4uLU6hMCjMI75M1A2tKUQC",
+        "Track",
+        "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC",
+        "https://i.scdn.co/image/test.jpg",
+        "Artist",
+    )
+
+    service.publish_spotify(
+        track,
+        audio,
+        chat_id="@second",
+        caption_html="<b>Custom</b>",
+    )
+
+    photo_call, audio_call = captured
+    assert photo_call["url"].endswith("/sendPhoto")
+    assert "botsecond-token" in photo_call["url"]
+    assert photo_call["data"]["chat_id"] == "@second"
+    assert photo_call["data"]["caption"] == "<b>Custom</b>"
+    assert photo_call["files"] == {"photo"}
+
+    assert audio_call["url"].endswith("/sendAudio")
+    assert "botsecond-token" in audio_call["url"]
+    assert audio_call["data"]["chat_id"] == "@second"
+    assert audio_call["data"]["caption"] == ""
+    assert audio_call["data"]["title"] == "Track"
+    assert audio_call["data"]["performer"] == "Artist"
+    assert audio_call["files"] == {"audio", "thumbnail"}
+
+
+def test_spotify_track_url_can_be_read_from_command_or_reply() -> None:
+    url = "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC?si=test"
+    normalized = "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC"
+
+    assert spotify_track_url_from_text(f"/spotify {url}") == normalized
+    assert spotify_track_url_from_text(f"Послушай: {url}.") == normalized
+    with pytest.raises(ValueError, match="Добавьте ссылку"):
+        spotify_track_url_from_text("/spotify")
+
+
+def test_instagram_url_can_be_read_from_command_or_reply() -> None:
+    url = "https://www.instagram.com/p/ABC_123/?igsh=test"
+
+    assert instagram_url_from_text(f"/instagram {url}") == url
+    assert instagram_url_from_text(f"Посмотри {url}.") == url
+    with pytest.raises(ValueError, match="Добавьте ссылку"):
+        instagram_url_from_text("/instagram")
+
+
+def test_telegram_command_menu_contains_spotify_and_instagram(
+    tmp_path, monkeypatch
+) -> None:
+    service = TikTokToTelegram(make_service_config(tmp_path))
+    captured = {}
+
+    class Response:
+        def json(self):
+            return {"ok": True, "result": True}
+
+    def fake_post(url, data, timeout):
+        captured.update(url=url, data=dict(data), timeout=timeout)
+        return Response()
+
+    monkeypatch.setattr("app.service.requests.post", fake_post)
+
+    service._ensure_telegram_commands("token", 1)
+
+    commands = json.loads(captured["data"]["commands"])
+    assert [item["command"] for item in commands] == ["spotify", "instagram"]
+
+
+def test_telegram_spotify_command_registers_admin_chat_and_publishes(
+    tmp_path, monkeypatch
+) -> None:
+    config = make_service_config(tmp_path)
+    service = TikTokToTelegram(config)
+    audio = tmp_path / "track.mp3"
+    audio.write_bytes(b"mp3")
+    track = SpotifyTrack(
+        "4uLU6hMCjMI75M1A2tKUQC",
+        "Track",
+        "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC",
+        "https://i.scdn.co/image/test.jpg",
+        "Artist",
+    )
+    calls: list[tuple] = []
+
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    def fake_get(url, params, timeout):
+        assert url.endswith("/getChatMember")
+        assert params == {"chat_id": -100999, "user_id": 42}
+        return Response({"ok": True, "result": {"status": "administrator"}})
+
+    def fake_post(url, data, timeout):
+        calls.append((url.rsplit("/", 1)[-1], dict(data)))
+        if url.endswith("/sendMessage"):
+            return Response({"ok": True, "result": {"message_id": 73}})
+        return Response({"ok": True, "result": True})
+
+    published = {}
+
+    def fake_publish(track_arg, path, bot_token, chat_id, **kwargs):
+        published.update(
+            track=track_arg,
+            path=path,
+            bot_token=bot_token,
+            chat_id=chat_id,
+            kwargs=kwargs,
+        )
+
+    monkeypatch.setattr("app.service.requests.get", fake_get)
+    monkeypatch.setattr("app.service.requests.post", fake_post)
+    monkeypatch.setattr(
+        service, "get_spotify_info", lambda url, user_id=1: track
+    )
+    monkeypatch.setattr(
+        service, "download_spotify", lambda track_arg, output_id, user_id=1: audio
+    )
+    monkeypatch.setattr(service, "_publish_spotify_to_telegram", fake_publish)
+
+    service.process_telegram_update(
+        {
+            "message": {
+                "text": (
+                    "/spotify "
+                    "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC"
+                ),
+                "chat": {
+                    "id": -100999,
+                    "title": "Music chat",
+                    "type": "supergroup",
+                },
+                "from": {"id": 42},
+                "message_thread_id": 17,
+            }
+        },
+        "command-token",
+        1,
+    )
+
+    destination = service.storage.telegram_destination("-100999")
+    assert destination.name == "Music chat"
+    assert destination.bot_token == "command-token"
+    assert published == {
+        "track": track,
+        "path": audio,
+        "bot_token": "command-token",
+        "chat_id": "-100999",
+        "kwargs": {"caption_html": None, "message_thread_id": 17},
+    }
+    assert calls[0] == (
+        "sendMessage",
+        {
+            "chat_id": "-100999",
+            "text": "Готовлю MP3 320 кбит/с…",
+            "message_thread_id": 17,
+        },
+    )
+    assert calls[-1] == (
+        "deleteMessage",
+        {"chat_id": "-100999", "message_id": 73},
+    )
+
+
+def test_telegram_spotify_command_reads_link_from_replied_message(
+    tmp_path, monkeypatch
+) -> None:
+    service = TikTokToTelegram(make_service_config(tmp_path))
+    captured = {}
+    track = SpotifyTrack(
+        "4uLU6hMCjMI75M1A2tKUQC",
+        "Track",
+        "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC",
+        "",
+        "Artist",
+    )
+    audio = tmp_path / "track.mp3"
+    audio.write_bytes(b"mp3")
+
+    class Response:
+        def json(self):
+            return {"ok": True, "result": {"message_id": 1}}
+
+    monkeypatch.setattr(
+        "app.service.requests.post", lambda *args, **kwargs: Response()
+    )
+    monkeypatch.setattr(
+        service,
+        "get_spotify_info",
+        lambda url, user_id=1: captured.setdefault("url", url) and track,
+    )
+    monkeypatch.setattr(
+        service, "download_spotify", lambda track_arg, output_id, user_id=1: audio
+    )
+    monkeypatch.setattr(
+        service, "_publish_spotify_to_telegram", lambda *args, **kwargs: None
+    )
+
+    service.process_telegram_update(
+        {
+            "message": {
+                "text": "/spotify",
+                "chat": {"id": 123, "type": "private"},
+                "from": {"id": 42},
+                "reply_to_message": {
+                    "text": (
+                        "https://open.spotify.com/track/"
+                        "4uLU6hMCjMI75M1A2tKUQC?si=reply"
+                    )
+                },
+            }
+        },
+        "token",
+        1,
+    )
+
+    assert captured["url"] == (
+        "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC"
+    )
+
+
+def test_telegram_instagram_command_publishes_carousel_and_cleans_files(
+    tmp_path, monkeypatch
+) -> None:
+    service = TikTokToTelegram(make_service_config(tmp_path))
+    first = tmp_path / "first.jpg"
+    second = tmp_path / "second.jpg"
+    first.write_bytes(b"one")
+    second.write_bytes(b"two")
+    post = Video(
+        "ABC_123",
+        "creator",
+        "Описание поста",
+        "https://www.instagram.com/p/ABC_123/",
+        0,
+        platform="instagram",
+        author_url="https://www.instagram.com/creator/",
+        media_type="image",
+    )
+    calls = []
+    published = {}
+
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    def fake_post(url, data, timeout):
+        calls.append((url.rsplit("/", 1)[-1], dict(data)))
+        if url.endswith("/sendMessage"):
+            return Response({"ok": True, "result": {"message_id": 74}})
+        return Response({"ok": True, "result": True})
+
+    def fake_prepare(url, user_id=1):
+        assert url == "https://www.instagram.com/p/ABC_123/?igsh=test"
+        assert user_id == 1
+        return post, (first, second)
+
+    def fake_publish(video, paths, bot_token, chat_id, caption, **kwargs):
+        published.update(
+            video=video,
+            paths=paths,
+            bot_token=bot_token,
+            chat_id=chat_id,
+            caption=caption,
+            kwargs=kwargs,
+        )
+
+    monkeypatch.setattr("app.service.requests.post", fake_post)
+    monkeypatch.setattr(service, "prepare_url", fake_prepare)
+    monkeypatch.setattr(service, "_publish_media_to_telegram", fake_publish)
+
+    service.process_telegram_update(
+        {
+            "message": {
+                "text": (
+                    "/instagram "
+                    "https://www.instagram.com/p/ABC_123/?igsh=test"
+                ),
+                "chat": {"id": 123, "type": "private"},
+                "from": {"id": 42},
+                "message_thread_id": 18,
+            }
+        },
+        "command-token",
+        1,
+    )
+
+    assert published["video"] == post
+    assert published["paths"] == (first, second)
+    assert published["bot_token"] == "command-token"
+    assert published["chat_id"] == "123"
+    assert "creator" in published["caption"]
+    assert "Описание поста" in published["caption"]
+    assert published["kwargs"] == {"message_thread_id": 18}
+    assert not first.exists()
+    assert not second.exists()
+    assert calls[0] == (
+        "sendMessage",
+        {
+            "chat_id": "123",
+            "text": "Скачиваю Instagram-пост…",
+            "message_thread_id": 18,
+        },
+    )
+    assert calls[-1] == (
+        "deleteMessage",
+        {"chat_id": "123", "message_id": 74},
+    )
+
+
+def test_telegram_command_poll_persists_update_offset(tmp_path, monkeypatch) -> None:
+    service = TikTokToTelegram(make_service_config(tmp_path))
+    captured = {}
+
+    class Response:
+        def json(self):
+            return {
+                "ok": True,
+                "result": [{"update_id": 91, "message": {"text": "обычный текст"}}],
+            }
+
+    monkeypatch.setattr(service, "_telegram_bot_owners", lambda: {"token": 1})
+    monkeypatch.setattr(
+        service, "_ensure_telegram_commands", lambda token, user_id: None
+    )
+
+    def fake_get(url, params, timeout):
+        captured.update(url=url, params=dict(params), timeout=timeout)
+        return Response()
+
+    monkeypatch.setattr("app.service.requests.get", fake_get)
+
+    assert service.poll_telegram_commands_once() == 1
+    assert captured["params"]["offset"] == 0
+    assert '"message"' in captured["params"]["allowed_updates"]
+    assert service.storage.setting("telegram_spotify_offset_token", "0") == "92"
 
 
 def test_publish_tiktok_image_post_sends_media_group(tmp_path, monkeypatch) -> None:
@@ -771,6 +1251,137 @@ def test_service_updates_uploaded_cookies_without_restart(tmp_path) -> None:
     assert path == tmp_path / "users" / "1" / "instagram-cookies.txt"
     assert service.instagram_cookies_file == path
     assert path.read_bytes() == b"# Netscape HTTP Cookie File\n"
+
+
+def test_service_requires_sp_dc_in_uploaded_spotify_cookies(tmp_path) -> None:
+    config = Config(
+        telegram_bot_token="token",
+        telegram_chat_id="@main",
+        tiktok_channels=(),
+        poll_interval_seconds=300,
+        scan_limit=15,
+        post_existing=False,
+        data_dir=tmp_path,
+        cookies_file=None,
+        instagram_cookies_file=None,
+        youtube_cookies_file=None,
+        youtube_po_token_provider_url=None,
+        web_host="127.0.0.1",
+        web_port=8080,
+        web_username=None,
+        web_password=None,
+    )
+    service = TikTokToTelegram(config)
+
+    with pytest.raises(ValueError, match="sp_dc"):
+        service.update_cookies(
+            "spotify",
+            b"# Netscape HTTP Cookie File\n.spotify.com\tTRUE\t/\tTRUE\t0\tsp_key\tvalue\n",
+        )
+
+    path = service.update_cookies(
+        "spotify",
+        b"# Netscape HTTP Cookie File\n.spotify.com\tTRUE\t/\tTRUE\t0\tsp_dc\tsecret\n",
+    )
+    assert path == tmp_path / "users" / "1" / "spotify-cookies.txt"
+    assert has_spotify_auth_cookie(path)
+
+
+def test_service_startup_keeps_active_spotify_download_directory(tmp_path) -> None:
+    active_download = tmp_path / "downloads" / "spotify-active"
+    active_download.mkdir(parents=True)
+    source = active_download / "source.ogg"
+    source.write_bytes(b"active")
+    config = Config(
+        telegram_bot_token="token",
+        telegram_chat_id="@main",
+        tiktok_channels=(),
+        poll_interval_seconds=300,
+        scan_limit=15,
+        post_existing=False,
+        data_dir=tmp_path,
+        cookies_file=None,
+        instagram_cookies_file=None,
+        youtube_cookies_file=None,
+        youtube_po_token_provider_url=None,
+        web_host="127.0.0.1",
+        web_port=8080,
+        web_username=None,
+        web_password=None,
+    )
+
+    TikTokToTelegram(config)
+
+    assert source.read_bytes() == b"active"
+
+
+def test_spotify_download_uses_direct_high_quality_stream_and_mp3_320(
+    tmp_path, monkeypatch
+) -> None:
+    config = Config(
+        telegram_bot_token="token",
+        telegram_chat_id="@main",
+        tiktok_channels=(),
+        poll_interval_seconds=300,
+        scan_limit=15,
+        post_existing=False,
+        data_dir=tmp_path,
+        cookies_file=None,
+        instagram_cookies_file=None,
+        youtube_cookies_file=None,
+        youtube_po_token_provider_url=None,
+        web_host="127.0.0.1",
+        web_port=8080,
+        web_username=None,
+        web_password=None,
+    )
+    service = TikTokToTelegram(config)
+    service.update_cookies(
+        "spotify",
+        b"# Netscape HTTP Cookie File\n.spotify.com\tTRUE\t/\tTRUE\t0\tsp_dc\tsecret\n",
+    )
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        if command[1:3] == ["-m", "app.spotify_auth"]:
+            Path(command[-1]).write_text(
+                '{"access_token":"token","premium":true}',
+                encoding="utf-8",
+            )
+        elif command[1:3] == ["-m", "app.spotify_player"]:
+            Path(command[-1]).write_bytes(b"ogg")
+        else:
+            Path(command[-1]).write_bytes(b"mp3")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    class CoverResponse:
+        headers = {"Content-Type": "image/jpeg"}
+        content = b"jpg"
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr("app.service.subprocess.run", fake_run)
+    monkeypatch.setattr("app.service.requests.get", lambda *args, **kwargs: CoverResponse())
+    track = SpotifyTrack(
+        "4uLU6hMCjMI75M1A2tKUQC",
+        "Track",
+        "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC",
+        "https://i.scdn.co/image/test.jpg",
+    )
+
+    result = service.download_spotify(track, "spotify-test")
+
+    assert result.read_bytes() == b"mp3"
+    auth_command, player_command, ffmpeg_command = commands
+    assert auth_command[1:3] == ["-m", "app.spotify_auth"]
+    assert player_command[1:3] == ["-m", "app.spotify_player"]
+    assert player_command[-2] == track.track_id
+    assert ["-b:a", "320k"] == ffmpeg_command[
+        ffmpeg_command.index("-b:a") : ffmpeg_command.index("-b:a") + 2
+    ]
+    assert "attached_pic" in ffmpeg_command
 
 
 def test_service_accepts_private_telegram_channel_id(tmp_path, monkeypatch) -> None:

@@ -20,7 +20,14 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
 from app.config import Config, TelegramChannel
-from app.service import TikTokToTelegram, Video, YouTubeVideo, is_instagram_url, is_tiktok_video_url
+from app.service import (
+    SpotifyTrack,
+    TikTokToTelegram,
+    Video,
+    YouTubeVideo,
+    is_instagram_url,
+    is_tiktok_video_url,
+)
 from app.storage import User
 
 LOGGER = logging.getLogger(__name__)
@@ -185,14 +192,25 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
 
     def service_permissions(user_id: int | None = None) -> dict[str, bool]:
         if not auth_supported:
-            return {"tiktok": True, "instagram": True, "youtube": True}
+            return {
+                "tiktok": True,
+                "instagram": True,
+                "youtube": True,
+                "spotify": True,
+            }
         user = auth_storage.get_user(user_id or active_user_id())
         if not user or user.is_disabled:
-            return {"tiktok": False, "instagram": False, "youtube": False}
+            return {
+                "tiktok": False,
+                "instagram": False,
+                "youtube": False,
+                "spotify": False,
+            }
         return {
             "tiktok": user.allow_tiktok,
             "instagram": user.allow_instagram,
             "youtube": user.allow_youtube,
+            "spotify": user.allow_spotify,
         }
 
     def require_service(service_name: str, user_id: int | None = None) -> None:
@@ -410,6 +428,7 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
             allow_tiktok=request.form.get("allow_tiktok") == "on",
             allow_instagram=request.form.get("allow_instagram") == "on",
             allow_youtube=request.form.get("allow_youtube") == "on",
+            allow_spotify=request.form.get("allow_spotify") == "on",
         )
         return redirect(url_for("admin_user_detail", user_id=user_id, saved="1"))
 
@@ -429,6 +448,7 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
             allow_tiktok=user.allow_tiktok,
             allow_instagram=user.allow_instagram,
             allow_youtube=user.allow_youtube,
+            allow_spotify=user.allow_spotify,
         )
         return redirect(url_for("admin_users", page=request.args.get("page", "1")))
 
@@ -797,6 +817,136 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
             LOGGER.exception("Failed to inspect YouTube URL %s", youtube_url)
             return jsonify({"error": str(error)}), 400
 
+    @app.post("/spotify/info")
+    def spotify_info():
+        user_id = active_user_id()
+        spotify_url = request.form.get("spotify_url", "").strip()
+        try:
+            require_service("spotify", user_id)
+            track = service.get_spotify_info(
+                *with_user_arg((spotify_url,), user_id)
+            )
+            selected_chat_id = request.form.get("chat_id", "").strip()
+            if selected_chat_id:
+                selected_chat_id = validate_chat_id(selected_chat_id, user_id)
+            return jsonify(
+                {
+                    "title": track.title,
+                    "artist": track.artist,
+                    "thumbnail_url": track.thumbnail_url,
+                    "audio_download_url": url_for(
+                        "spotify_audio", track_id=track.track_id
+                    ),
+                    "post_url": url_for(
+                        "spotify_post",
+                        track_id=track.track_id,
+                        chat_id=selected_chat_id,
+                    ),
+                }
+            )
+        except Exception as error:
+            LOGGER.exception("Failed to inspect Spotify URL %s", spotify_url)
+            return jsonify({"error": str(error)}), 400
+
+    @app.get("/spotify/audio/<track_id>")
+    def spotify_audio(track_id: str):
+        user_id = active_user_id()
+        try:
+            require_service("spotify", user_id)
+            track = service.get_spotify_info(
+                *with_user_arg(
+                    (f"https://open.spotify.com/track/{track_id}",),
+                    user_id,
+                )
+            )
+            path = service.download_spotify(
+                *with_user_arg(
+                    (track, f"spotify-{user_id}-{track.track_id}"),
+                    user_id,
+                )
+            )
+            filename = secure_filename(track.title).strip("._")
+            return send_file(
+                path,
+                mimetype="audio/mpeg",
+                as_attachment=True,
+                download_name=f"{filename or track.track_id}.mp3",
+                conditional=True,
+            )
+        except Exception as error:
+            LOGGER.exception("Failed to download Spotify track %s", track_id)
+            return jsonify({"error": str(error)}), 400
+
+    @app.get("/spotify/post/<track_id>")
+    def spotify_post(track_id: str):
+        user_id = active_user_id()
+        require_service("spotify", user_id)
+        track = service.get_spotify_info(
+            *with_user_arg(
+                (f"https://open.spotify.com/track/{track_id}",),
+                user_id,
+            )
+        )
+        return render_template(
+            "spotify_edit.html",
+            track=track,
+            telegram_channels=telegram_channels(user_id),
+            selected_chat_id=request.args.get("chat_id", ""),
+            service_permissions=service_permissions(user_id),
+        )
+
+    @app.post("/spotify/send/<track_id>")
+    def spotify_send(track_id: str):
+        user_id = active_user_id()
+        before_text = request.form.get("before_text", "")
+        after_text = request.form.get("after_text", "")
+        caption_html = request.form.get("caption_html")
+        selected_chat_id = request.form.get("chat_id", "")
+        track = None
+        try:
+            require_service("spotify", user_id)
+            selected_chat_id = validate_chat_id(selected_chat_id, user_id)
+            track = service.get_spotify_info(
+                *with_user_arg(
+                    (f"https://open.spotify.com/track/{track_id}",),
+                    user_id,
+                )
+            )
+            path = service.download_spotify(
+                *with_user_arg(
+                    (track, f"spotify-{user_id}-{track.track_id}"),
+                    user_id,
+                )
+            )
+            service.publish_spotify(
+                *with_user_arg(
+                    (
+                        track,
+                        path,
+                        before_text,
+                        after_text,
+                        selected_chat_id,
+                        caption_html,
+                    ),
+                    user_id,
+                )
+            )
+            return redirect(url_for("done", source="spotify"))
+        except Exception as error:
+            LOGGER.exception("Failed to publish Spotify track %s", track_id)
+            if track is None:
+                return jsonify({"error": str(error)}), 400
+            return render_template(
+                "spotify_edit.html",
+                track=track,
+                telegram_channels=telegram_channels(user_id),
+                selected_chat_id=selected_chat_id,
+                before_text=before_text,
+                after_text=after_text,
+                caption_html=caption_html,
+                error=str(error),
+            ), 502
+
     @app.get("/youtube/thumbnail/<job_id>")
     def youtube_thumbnail(job_id: str):
         job = youtube_jobs.get(job_id)
@@ -855,6 +1005,7 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
         caption_html = request.form.get("caption_html")
         selected_chat_id = request.form.get("chat_id", "")
         try:
+            selected_chat_id = validate_chat_id(selected_chat_id, job.user_id)
             service.publish_youtube(
                 *with_user_arg(
                     (
@@ -915,10 +1066,13 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
         include_description = (
             request.form.get("include_description") == "on" if options_present else True
         )
-        selected_chat_id = request.form.get("chat_id", job.selected_chat_id)
+        selected_chat_id = (
+            request.form.get("chat_id", "").strip() or job.selected_chat_id
+        )
         selected_image_indices: tuple[int, ...] | None = None
         publish_paths = job.paths
         try:
+            selected_chat_id = validate_chat_id(selected_chat_id, job.user_id)
             if (
                 job.video.media_type == "image"
                 and request.form.get("image_selection_present") == "1"

@@ -27,6 +27,7 @@ class User:
     allow_tiktok: bool = True
     allow_instagram: bool = True
     allow_youtube: bool = True
+    allow_spotify: bool = True
     must_set_password: bool = False
     created_at: str = ""
 
@@ -37,6 +38,8 @@ class User:
             return self.allow_instagram
         if service_name == "youtube":
             return self.allow_youtube
+        if service_name == "spotify":
+            return self.allow_spotify
         return False
 
 
@@ -73,18 +76,24 @@ class Storage:
                 allow_tiktok INTEGER NOT NULL DEFAULT 1,
                 allow_instagram INTEGER NOT NULL DEFAULT 1,
                 allow_youtube INTEGER NOT NULL DEFAULT 1,
+                allow_spotify INTEGER NOT NULL DEFAULT 1,
                 must_set_password INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
+        if "allow_spotify" not in self._table_columns("users"):
+            self.connection.execute(
+                "ALTER TABLE users ADD COLUMN allow_spotify INTEGER NOT NULL DEFAULT 1"
+            )
         self.connection.execute(
             """
             INSERT OR IGNORE INTO users(
                 id, username, password_hash, is_admin, is_disabled,
-                allow_tiktok, allow_instagram, allow_youtube, must_set_password
+                allow_tiktok, allow_instagram, allow_youtube, allow_spotify,
+                must_set_password
             )
-            VALUES (1, 'boyd', NULL, 1, 0, 1, 1, 1, 1)
+            VALUES (1, 'boyd', NULL, 1, 0, 1, 1, 1, 1, 1)
             """
         )
         self._ensure_processed_videos()
@@ -284,7 +293,8 @@ class Storage:
             bool(row[6]),
             bool(row[7]),
             bool(row[8]),
-            str(row[9]),
+            bool(row[9]),
+            str(row[10]),
         )
 
     def get_user(self, user_id: int) -> User | None:
@@ -292,7 +302,7 @@ class Storage:
             row = self.connection.execute(
                 """
                 SELECT id, username, password_hash, is_admin, is_disabled,
-                       allow_tiktok, allow_instagram, allow_youtube,
+                       allow_tiktok, allow_instagram, allow_youtube, allow_spotify,
                        must_set_password, created_at
                 FROM users WHERE id = ?
                 """,
@@ -305,7 +315,7 @@ class Storage:
             row = self.connection.execute(
                 """
                 SELECT id, username, password_hash, is_admin, is_disabled,
-                       allow_tiktok, allow_instagram, allow_youtube,
+                       allow_tiktok, allow_instagram, allow_youtube, allow_spotify,
                        must_set_password, created_at
                 FROM users WHERE username = ? COLLATE NOCASE
                 """,
@@ -349,6 +359,7 @@ class Storage:
         allow_tiktok: bool,
         allow_instagram: bool,
         allow_youtube: bool,
+        allow_spotify: bool,
     ) -> None:
         if user_id == 1:
             is_admin = True
@@ -357,7 +368,8 @@ class Storage:
                 """
                 UPDATE users
                 SET username = ?, is_admin = ?, is_disabled = ?,
-                    allow_tiktok = ?, allow_instagram = ?, allow_youtube = ?
+                    allow_tiktok = ?, allow_instagram = ?, allow_youtube = ?,
+                    allow_spotify = ?
                 WHERE id = ?
                 """,
                 (
@@ -367,6 +379,7 @@ class Storage:
                     int(allow_tiktok),
                     int(allow_instagram),
                     int(allow_youtube),
+                    int(allow_spotify),
                     user_id,
                 ),
             )
@@ -381,7 +394,7 @@ class Storage:
             rows = self.connection.execute(
                 """
                 SELECT id, username, password_hash, is_admin, is_disabled,
-                       allow_tiktok, allow_instagram, allow_youtube,
+                       allow_tiktok, allow_instagram, allow_youtube, allow_spotify,
                        must_set_password, created_at
                 FROM users
                 ORDER BY id
@@ -396,7 +409,7 @@ class Storage:
             rows = self.connection.execute(
                 """
                 SELECT id, username, password_hash, is_admin, is_disabled,
-                       allow_tiktok, allow_instagram, allow_youtube,
+                       allow_tiktok, allow_instagram, allow_youtube, allow_spotify,
                        must_set_password, created_at
                 FROM users
                 WHERE is_disabled = 0

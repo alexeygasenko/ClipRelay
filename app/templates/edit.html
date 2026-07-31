@@ -14,7 +14,7 @@
   {% else %}
   <video controls preload="metadata" src="{{ url_for('preview', job_id=job.job_id) }}"></video>
   {% endif %}
-  <form id="prepared-post-form" class="card" action="{{ url_for('send', job_id=job.job_id) }}" method="post" autocomplete="off">
+  <form id="prepared-post-form" class="card" action="{{ url_for('send', job_id=job.job_id) }}" method="post" autocomplete="off" data-telegram-publish-form>
     <div class="author">
       Автор:
       <a href="{{ job.video.author_url or ('https://www.tiktok.com/@' ~ job.video.username) }}" target="_blank" rel="noreferrer">
@@ -41,11 +41,11 @@
       </div>
     </div>
     <div class="actions">
-      <button type="submit">Отправить в Telegram</button>
+      <button type="submit" data-publish-submit><span data-publish-label>Отправить в Telegram</span></button>
     </div>
     <p class="hint">При превышении лимита Telegram подпись автоматически сократится.</p>
   </form>
 </section>
-<script src="{{ url_for('static', filename='caption_builder.js', v=4) }}"></script>
+<script src="{{ url_for('static', filename='caption_builder.js', v=5) }}"></script>
 <script>window.initCaptionBuilders?.(document.currentScript.closest("main") || document);</script>
 {% endblock %}

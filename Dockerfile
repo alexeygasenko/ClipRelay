@@ -13,6 +13,12 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+RUN python -m venv /opt/spotify-player \
+    && /opt/spotify-player/bin/pip install --no-cache-dir \
+        librespot==0.0.10 protobuf==3.20.1
+
+ENV SPOTIFY_PLAYER_PYTHON=/opt/spotify-player/bin/python
+
 COPY app ./app
 
 RUN useradd --create-home app \

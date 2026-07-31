@@ -15,6 +15,11 @@ def main() -> None:
     config = Config.from_sources()
     service = TikTokToTelegram(config)
     threading.Thread(target=service.run_forever, daemon=True, name="monitor").start()
+    threading.Thread(
+        target=service.run_telegram_commands_forever,
+        daemon=True,
+        name="telegram-commands",
+    ).start()
     serve(create_app(config, service), host=config.web_host, port=config.web_port, threads=4)
 
 

@@ -274,6 +274,15 @@
     });
     document.addEventListener("submit", (event) => {
       event.target.querySelectorAll("[data-caption-builder]").forEach(updateBuilder);
+      const form = event.target.closest("[data-telegram-publish-form]");
+      if (!form) return;
+      const button = form.querySelector("[data-publish-submit]");
+      if (!button || button.disabled) return;
+      button.disabled = true;
+      button.setAttribute("aria-busy", "true");
+      button.classList.add("publish-progress-indeterminate");
+      const label = button.querySelector("[data-publish-label]");
+      if (label) label.textContent = "Отправляем в Telegram…";
     }, true);
     window.addEventListener("scroll", hideMenu, true);
     window.addEventListener("resize", hideMenu);

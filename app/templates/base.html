@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}ClipRelay{% endblock %}</title>
   <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v=6) }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v=10) }}">
 </head>
 <body class="{% block body_class %}{% endblock %}">
   <div class="ambient ambient-one"></div>
@@ -93,12 +93,14 @@
       });
       if (option) {
         const owner = option.closest("[data-channel-picker]");
-        owner.querySelector("input[type=hidden]").value = option.dataset.channelValue;
+        const input = owner.querySelector("input[type=hidden]");
+        input.value = option.dataset.channelValue;
         owner.querySelector("[data-channel-label]").textContent = option.dataset.channelLabel;
         owner.querySelector("[data-channel-tag]").textContent = option.dataset.channelDisplay;
         owner.querySelectorAll("[data-channel-value]").forEach((item) => item.classList.toggle("selected", item === option));
         owner.classList.remove("open");
         owner.querySelector("[data-channel-menu]").hidden = true;
+        input.dispatchEvent(new Event("change", {bubbles: true}));
         return;
       }
       const trigger = event.target.closest("[data-channel-trigger]");

@@ -1,8 +1,9 @@
+from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
 
 from app.config import Config, TelegramChannel
-from app.service import TikTokToTelegram
+from app.service import SpotifyTrack, TikTokToTelegram
 from app.service import Video, YouTubeVideo
 from app.web import create_app
 
@@ -17,6 +18,7 @@ class FakeService:
         self.path = path
         self.storage = FakeStorage()
         self.published = None
+        self.published_spotify = None
         self.imported = None
 
     def prepare_url(self, url: str):
@@ -52,6 +54,38 @@ class FakeService:
 
     def get_youtube_info(self, url: str) -> YouTubeVideo:
         return YouTubeVideo("yt1", "YouTube title", url, "https://i.ytimg.com/test.jpg", 60, "Channel")
+
+    def get_spotify_info(self, url: str) -> SpotifyTrack:
+        return SpotifyTrack(
+            "4uLU6hMCjMI75M1A2tKUQC",
+            "Spotify title",
+            url,
+            "https://i.scdn.co/image/test.jpg",
+            "Spotify artist",
+        )
+
+    def download_spotify(self, track: SpotifyTrack, output_id: str) -> Path:
+        path = self.path.parent / f"{output_id}.mp3"
+        path.write_bytes(b"mp3")
+        return path
+
+    def publish_spotify(
+        self,
+        track: SpotifyTrack,
+        path: Path,
+        before_text: str,
+        after_text: str,
+        chat_id: str,
+        caption_html: str = "",
+    ) -> None:
+        self.published_spotify = (
+            track,
+            path,
+            before_text,
+            after_text,
+            chat_id,
+            caption_html,
+        )
 
     def publish_youtube(
         self,
@@ -248,6 +282,74 @@ def test_youtube_info_returns_download_links(tmp_path: Path) -> None:
     assert "/youtube/post/" in payload["post_url"]
 
 
+def test_spotify_info_and_direct_mp3_download(tmp_path: Path) -> None:
+    client = create_app(
+        make_config(tmp_path), FakeService(tmp_path / "video.mp4")
+    ).test_client()
+
+    response = client.post(
+        "/spotify/info",
+        data={
+            "spotify_url": (
+                "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC"
+            )
+        },
+    )
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["title"] == "Spotify title"
+    assert payload["artist"] == "Spotify artist"
+    assert "/spotify/audio/" in payload["audio_download_url"]
+    assert payload["audio_download_url"].endswith("4uLU6hMCjMI75M1A2tKUQC")
+    assert "/spotify/post/" in payload["post_url"]
+
+    fresh_client = create_app(
+        make_config(tmp_path), FakeService(tmp_path / "video.mp4")
+    ).test_client()
+    response = fresh_client.get(payload["audio_download_url"])
+
+    assert response.status_code == 200
+    assert response.mimetype == "audio/mpeg"
+    assert response.data == b"mp3"
+    assert "Spotify_title.mp3" in response.headers["Content-Disposition"]
+
+
+def test_spotify_post_can_be_prepared_and_sent(tmp_path: Path) -> None:
+    service = FakeService(tmp_path / "video.mp4")
+    client = create_app(make_config(tmp_path), service).test_client()
+    payload = client.post(
+        "/spotify/info",
+        data={
+            "spotify_url": "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC",
+            "chat_id": "@second",
+        },
+    ).get_json()
+
+    response = client.get(payload["post_url"])
+    assert response.status_code == 200
+    assert "Подготовьте Spotify-пост" in response.text
+    assert "Spotify artist" in response.text
+    assert 'name="chat_id" value="@second"' in response.text
+    assert "data-telegram-publish-form" in response.text
+    assert "data-publish-submit" in response.text
+
+    response = client.post(
+        "/spotify/send/4uLU6hMCjMI75M1A2tKUQC",
+        data={
+            "chat_id": "@second",
+            "caption_html": "<b>Готовый трек</b>",
+        },
+    )
+
+    assert response.status_code == 302
+    assert response.headers["Location"].endswith("/done?source=spotify")
+    assert service.published_spotify[4:] == (
+        "@second",
+        "<b>Готовый трек</b>",
+    )
+
+
 def test_home_has_post_builder_transition(tmp_path: Path) -> None:
     client = create_app(make_config(tmp_path), FakeService(tmp_path / "video.mp4")).test_client()
 
@@ -263,6 +365,36 @@ def test_home_has_post_builder_transition(tmp_path: Path) -> None:
     assert 'data-source-tab="tiktok"' in response.text
     assert 'data-source-tab="instagram"' in response.text
     assert 'data-source-tab="youtube"' in response.text
+    assert 'data-source-tab="spotify"' in response.text
+    assert 'id="spotify_url"' in response.text
+    assert 'id="spotify-artist"' in response.text
+    assert 'id="spotify-post"' in response.text
+    assert "syncPreparedPostChat" in response.text
+    assert 'input.addEventListener("change"' in response.text
+
+
+def test_private_chats_with_same_name_are_distinguished_by_id(
+    tmp_path: Path,
+) -> None:
+    config = replace(
+        make_config(tmp_path),
+        telegram_channels=(
+            TelegramChannel("Одинаковый чат", "-100111", "group"),
+            TelegramChannel("Одинаковый чат", "-100222", "supergroup"),
+        ),
+    )
+    client = create_app(config, FakeService(tmp_path / "video.mp4")).test_client()
+
+    response = client.get("/")
+
+    assert "ID -100111" in response.text
+    assert "ID -100222" in response.text
+    assert "download-progress-indeterminate" in response.text
+    assert response.text.count("source-icons/") == 4
+    assert "source-icons/tiktok.png" in response.text
+    assert "source-icons/instagram.png" in response.text
+    assert "source-icons/youtube.png" in response.text
+    assert "source-icons/spotify.png" in response.text
     assert "Вставьте ссылку на видео" in response.text
     assert "async function loadPostBuilder" in response.text
     assert "async function runInlineScripts" in response.text
@@ -558,6 +690,7 @@ def test_admin_password_setup_registration_and_service_permissions(tmp_path: Pat
     )
     assert response.status_code == 302
     assert not service.storage.get_user(alice.id).allow_youtube
+    assert not service.storage.get_user(alice.id).allow_spotify
 
     client.post("/logout")
     assert client.post(
@@ -566,7 +699,9 @@ def test_admin_password_setup_registration_and_service_permissions(tmp_path: Pat
     response = client.get("/")
     assert response.status_code == 200
     assert 'data-source-tab="youtube"' not in response.text
+    assert 'data-source-tab="spotify"' not in response.text
     assert "YouTube cookies" not in response.text
+    assert "Spotify cookies" not in response.text
 
     response = client.post(
         "/settings/cookies/youtube",

@@ -1014,7 +1014,7 @@ video { width: 100%; max-height: 650px; border-radius: 26px; background: rgba(0,
 }
 .source-tabs {
   display: grid;
-  grid-template-columns: repeat(3, minmax(150px, 190px));
+  grid-template-columns: repeat(4, minmax(150px, 190px));
   justify-content: center;
   align-items: center;
   gap: 18px;
@@ -1131,6 +1131,13 @@ video { width: 100%; max-height: 650px; border-radius: 26px; background: rgba(0,
 .source-tabs.selected .source-tab.carousel-right:hover {
   transform: translate3d(calc(-50% + 166px), 10px, -132px) rotateY(-68deg) skewY(2deg) scale(.76);
 }
+.source-tabs.selected .source-tab.carousel-hidden {
+  z-index: 1;
+  opacity: 0;
+  filter: blur(8px);
+  pointer-events: none;
+  transform: translate3d(-50%, 16px, -260px) scale(.58);
+}
 .source-logo {
   display: grid;
   place-items: center;
@@ -1139,18 +1146,15 @@ video { width: 100%; max-height: 650px; border-radius: 26px; background: rgba(0,
   flex: 0 0 64px;
   border-radius: 20px;
 }
-.source-logo svg { width: 54px; height: 54px; fill: currentColor; }
-.source-tabs.selected .source-logo { width: 26px; height: 26px; flex-basis: 26px; border-radius: 9px; }
-.source-tabs.selected .source-logo svg { width: 22px; height: 22px; }
-.source-logo.instagram-logo svg {
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2;
+.source-logo img {
+  display: block;
+  width: 54px;
+  height: 54px;
+  object-fit: contain;
+  filter: drop-shadow(0 7px 10px rgba(6, 10, 30, .24));
 }
-.youtube-logo .youtube-play { fill: #28304d; }
-.tiktok-logo { color: #62f8ff; filter: drop-shadow(2px 2px 0 rgba(254, 44, 85, .7)); }
-.instagram-logo { color: #ffd36e; }
-.youtube-logo { color: #ff4b61; }
+.source-tabs.selected .source-logo { width: 26px; height: 26px; flex-basis: 26px; border-radius: 9px; }
+.source-tabs.selected .source-logo img { width: 22px; height: 22px; }
 .source-panel-carousel {
   display: grid;
   place-items: start center;
@@ -1211,11 +1215,18 @@ video { width: 100%; max-height: 650px; border-radius: 26px; background: rgba(0,
 .source-panel.carousel-right {
   transform: translate3d(430px, 28px, -260px) rotateY(-66deg) skewY(1.5deg) scale(.78);
 }
+.source-panel.carousel-hidden {
+  z-index: 1;
+  opacity: 0;
+  filter: blur(10px);
+  pointer-events: none;
+  transform: translate3d(0, 44px, -520px) scale(.62);
+}
 .source-panel:not(.carousel-active) * {
   pointer-events: none;
   user-select: none;
 }
-.youtube-card.source-panel { min-height: auto; }
+.youtube-card.source-panel, .spotify-card.source-panel { min-height: auto; }
 .source-panel[hidden], .source-panel-carousel[hidden], [data-tiktok-panel][hidden] { display: none; }
 .carousel-home-action {
   display: none;
@@ -1236,7 +1247,7 @@ video { width: 100%; max-height: 650px; border-radius: 26px; background: rgba(0,
   animation: carousel-return-from-top .66s cubic-bezier(.18, .88, .16, 1) both;
 }
 .service-card { min-height: 370px; }
-.youtube-card.service-card { min-height: auto; }
+.youtube-card.service-card, .spotify-card.service-card { min-height: auto; }
 .service-heading { display: flex; gap: 14px; align-items: center; margin-bottom: 18px; }
 .service-heading h2, .youtube-meta h3 { margin: 0; line-height: 1.2; }
 .service-heading p, .youtube-meta p { margin: 4px 0 0; color: var(--muted); }
@@ -1255,6 +1266,7 @@ video { width: 100%; max-height: 650px; border-radius: 26px; background: rgba(0,
 .instagram-mark { background: linear-gradient(135deg, rgba(255, 194, 88, .62), rgba(223, 62, 183, .55), rgba(90, 84, 255, .5)); }
 .media-mark { font-size: 11px; }
 .youtube-mark { background: linear-gradient(135deg, rgba(255, 0, 51, .6), rgba(255, 92, 130, .38)); color: white; }
+.spotify-mark { background: linear-gradient(135deg, rgba(30, 215, 96, .72), rgba(14, 112, 58, .52)); color: white; }
 .check-row {
   display: flex;
   gap: 12px;
@@ -1288,6 +1300,57 @@ video { width: 100%; max-height: 650px; border-radius: 26px; background: rgba(0,
   object-fit: contain;
   background: rgba(6, 10, 28, .34);
 }
+.spotify-result {
+  display: grid;
+  grid-template-columns: minmax(190px, 260px) minmax(0, 1fr);
+  align-items: center;
+}
+.spotify-result[hidden] { display: none; }
+.spotify-result img {
+  aspect-ratio: 1;
+  object-fit: cover;
+}
+.spotify-result .download-actions { grid-template-columns: repeat(2, 1fr); }
+.spotify-result .youtube-meta > p { margin: 3px 0; }
+#spotify-audio-download [data-download-label] { position: relative; z-index: 2; }
+#spotify-audio-download::after {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  inset: 0 auto 0 0;
+  width: var(--download-progress, 0%);
+  background: linear-gradient(90deg, rgba(91, 235, 182, .34), rgba(71, 205, 255, .42));
+  transition: width .18s ease;
+  pointer-events: none;
+}
+#spotify-audio-download.download-progress-indeterminate::after {
+  width: 38%;
+  animation: spotify-download-progress 1.15s ease-in-out infinite;
+}
+[data-publish-submit] [data-publish-label] { position: relative; z-index: 2; }
+[data-publish-submit]::after {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  inset: 0 auto 0 0;
+  width: 38%;
+  background: linear-gradient(90deg, rgba(91, 235, 182, .34), rgba(71, 205, 255, .46));
+  opacity: 0;
+  pointer-events: none;
+}
+[data-publish-submit].publish-progress-indeterminate::after {
+  opacity: 1;
+  animation: spotify-download-progress 1.15s ease-in-out infinite;
+}
+[data-publish-submit][aria-busy="true"] {
+  cursor: var(--cursor-default), wait;
+  opacity: .82;
+}
+@keyframes spotify-download-progress {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(285%); }
+}
+[aria-disabled="true"] { opacity: .62; pointer-events: none; }
 .youtube-meta { padding: 12px; }
 .youtube-meta h3 { font-size: 16px; }
 .download-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 10px; }
@@ -1318,6 +1381,7 @@ video { width: 100%; max-height: 650px; border-radius: 26px; background: rgba(0,
   box-shadow: inset 0 1px rgba(255, 255, 255, .22), var(--shadow);
 }
 .youtube-post-media img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; }
+.spotify-post-media img { aspect-ratio: 1; }
 .youtube-post-media h2 { margin: 20px 22px 4px; font-size: 20px; line-height: 1.25; }
 .youtube-post-media p { margin: 0 22px 22px; color: var(--muted); }
 
@@ -1721,6 +1785,7 @@ video { width: 100%; max-height: 650px; border-radius: 26px; background: rgba(0,
   .image-carousel-prev { left: 9px; }
   .image-carousel-next { right: 9px; }
   .download-actions, .result-grid, .settings-grid, .settings-page .settings-grid { display: grid; grid-template-columns: 1fr; }
+  .spotify-result { grid-template-columns: 1fr; }
   .settings-page .settings-section:first-child { grid-column: auto; grid-row: auto; }
   .actions { display: grid; }
   .settings-toggle { top: 14px; right: 14px; }

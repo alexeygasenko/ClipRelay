@@ -8,6 +8,8 @@ Docker service for relaying social video posts to Telegram.
 - Automatically monitors configured TikTok channels.
 - Downloads YouTube videos and thumbnails in the best available quality.
 - Publishes YouTube links with thumbnails and prepared Telegram captions.
+- Downloads Spotify tracks directly from Spotify, converts them to 320 kbps MP3,
+  and publishes the audio to Telegram after caption editing.
 
 ## Setup
 
@@ -46,7 +48,23 @@ docker compose logs -f
 Open `http://127.0.0.1:6767`. For TikTok, paste a video or channel link. For
 Instagram, paste a video, reel, or post link. For YouTube, paste a video link:
 the thumbnail preview appears automatically, followed by buttons for downloading
-the video, downloading the thumbnail, and preparing the Telegram post.
+the video, downloading the thumbnail, and preparing the Telegram post. For
+Spotify, paste a link to an individual track to preview its cover and artist,
+download an MP3 with in-button progress, or prepare a Telegram post. The same
+track can be requested directly in a Telegram chat:
+
+```text
+/spotify https://open.spotify.com/track/…
+/instagram https://www.instagram.com/p/…
+```
+
+You can also reply to a message containing a link with `/spotify` or
+`/instagram`. Spotify sends the same pair of messages as the web interface: the
+cover with the post caption, followed by the MP3 with track metadata and cover
+thumbnail. Instagram sends the post video or all carousel images with the
+author and description. For a newly added group, the first ClipRelay command
+must be sent by a group administrator; ClipRelay then saves that chat as a
+Telegram destination.
 
 Each user has separate Telegram destinations, TikTok monitoring settings, and
 cookies. In the "Telegram settings and cookies" section, you can:
@@ -57,12 +75,16 @@ cookies. In the "Telegram settings and cookies" section, you can:
   an administrator and a new post is published in the channel;
 - replace TikTok cookies;
 - replace Instagram cookies;
-- replace YouTube cookies.
+- replace YouTube cookies;
+- replace Spotify cookies.
 
 Public Telegram channels are stored and displayed by `@handle`. Private
-channels are stored by numeric ID, but only the display name is shown in the UI.
-Channels can be searched and removed in settings. Search is also available when
-choosing a destination for publishing.
+channels are stored by numeric ID; the destination picker shows that ID so
+chats with identical names remain distinguishable. Channels can be searched and
+removed in settings. Search is also available when choosing a destination for
+publishing. The Telegram command menu is configured
+automatically on startup. Command polling uses `getUpdates`, so the same bot
+cannot have an active webhook at the same time.
 
 The TikTok, Instagram, and YouTube post builder supports Telegram HTML captions,
 including bold, italic, underline, strikethrough, spoiler, links, inline code,
@@ -80,7 +102,7 @@ Telegram bot token.
 The web interface uses built-in username/password accounts. The initial
 administrator is `boyd`; set the password on the first visit. Admin users can
 open the admin panel, view users with pagination, disable users, edit each
-user's settings, and disable access to TikTok, Instagram, or YouTube. If a
+user's settings, and disable access to TikTok, Instagram, YouTube, or Spotify. If a
 service is disabled for a user, its upload/download UI is hidden and cookies for
 that service cannot be uploaded.
 
@@ -131,6 +153,31 @@ YouTube often rotates cookies for open tabs. For a stable export:
 3. Export cookies for the `youtube.com` domain to `youtube-cookies.txt`.
 4. Close the incognito window immediately and do not reuse that session.
 5. Recreate the container with `docker compose up -d --force-recreate`.
+
+## Spotify Cookies
+
+Spotify downloads use the authenticated Spotify player session and the original
+Spotify CDN stream; YouTube and other replacement audio sources are not used.
+The `vorbis-high` stream is requested directly and converted to MP3 at 320
+kbps with `ffmpeg`. An active Spotify Premium account is required for the
+high-quality stream.
+
+Export cookies for `open.spotify.com` in Netscape format after signing in. The
+file must contain `sp_dc`. Upload it in the web interface settings, or configure
+an initial file:
+
+```yaml
+spotify:
+  cookies_file: spotify-cookies.txt
+```
+
+For Docker, also uncomment the corresponding `spotify-cookies.txt` volume in
+`compose.yaml`. This is not needed when the file is uploaded through the web
+interface.
+
+Use only tracks you are authorized to save. Automated downloading may conflict
+with Spotify's terms, and third-party player tools can put the Spotify account
+used for cookies at risk.
 
 ## Automatic Monitoring
 
