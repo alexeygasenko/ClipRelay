@@ -32,10 +32,23 @@ spotify:
   # и cookie sp_dc. Файл также можно загрузить через настройки приложения.
   # cookies_file: spotify-cookies.txt
 
+twitter:
+  # Необязательно для публичных постов. Cookies нужны для закрытых,
+  # возрастных или ограниченных публикаций X / Twitter.
+  # cookies_file: twitter-cookies.txt
+
+reddit:
+  # Необязательно для большинства публичных постов. Можно указать cookies
+  # для контента, доступного только после входа.
+  # cookies_file: reddit-cookies.txt
+
 web:
   host: 0.0.0.0
   port: 8080
-  # username: admin
-  # password: replace_with_a_long_password
+  # Одноразовые данные подтверждения первичной настройки администратора.
+  # Это не логин после настройки. Обязательно замените оба значения,
+  # особенно если порт приложения доступен не только с localhost.
+  username: setup-admin
+  password: replace_with_a_long_random_bootstrap_password
 
 data_dir: data

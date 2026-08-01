@@ -5,6 +5,14 @@ from types import SimpleNamespace
 import pytest
 
 from app.config import Config, TelegramChannel
+from app.media_sources import (
+    MediaSourcePost,
+    detect_media_platform,
+    parse_reddit_post,
+    parse_twitter_post,
+    validate_reddit_url,
+    validate_twitter_url,
+)
 from app.service import (
     SpotifyTrack,
     TikTokToTelegram,
@@ -21,6 +29,7 @@ from app.service import (
     build_caption,
     media_author_from_info,
     normalize_channel,
+    processed_media_key,
     resolve_caption_html,
     username_from_info,
     validate_tiktok_url,
@@ -714,7 +723,7 @@ def test_service_searches_spotify_with_authenticated_catalog(
     )
 
 
-def test_telegram_command_menu_contains_spotify_search_and_instagram(
+def test_telegram_command_menu_contains_all_download_sources(
     tmp_path, monkeypatch
 ) -> None:
     service = TikTokToTelegram(make_service_config(tmp_path))
@@ -737,63 +746,31 @@ def test_telegram_command_menu_contains_spotify_search_and_instagram(
         "spotify",
         "spotifysearch",
         "instagram",
+        "x",
+        "reddit",
     ]
 
 
-def test_telegram_spotify_command_registers_admin_chat_and_publishes(
+def test_telegram_spotify_command_rejects_unregistered_chat(
     tmp_path, monkeypatch
 ) -> None:
-    config = make_service_config(tmp_path)
-    service = TikTokToTelegram(config)
-    audio = tmp_path / "track.mp3"
-    audio.write_bytes(b"mp3")
-    track = SpotifyTrack(
-        "4uLU6hMCjMI75M1A2tKUQC",
-        "Track",
-        "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC",
-        "https://i.scdn.co/image/test.jpg",
-        "Artist",
-    )
+    service = TikTokToTelegram(make_service_config(tmp_path))
     calls: list[tuple] = []
 
     class Response:
-        def __init__(self, payload):
-            self.payload = payload
-
         def json(self):
-            return self.payload
-
-    def fake_get(url, params, timeout):
-        assert url.endswith("/getChatMember")
-        assert params == {"chat_id": -100999, "user_id": 42}
-        return Response({"ok": True, "result": {"status": "administrator"}})
+            return {"ok": True, "result": {"message_id": 73}}
 
     def fake_post(url, data, timeout):
         calls.append((url.rsplit("/", 1)[-1], dict(data)))
-        if url.endswith("/sendMessage"):
-            return Response({"ok": True, "result": {"message_id": 73}})
-        return Response({"ok": True, "result": True})
+        return Response()
 
-    published = {}
-
-    def fake_publish(track_arg, path, bot_token, chat_id, **kwargs):
-        published.update(
-            track=track_arg,
-            path=path,
-            bot_token=bot_token,
-            chat_id=chat_id,
-            kwargs=kwargs,
-        )
-
-    monkeypatch.setattr("app.service.requests.get", fake_get)
     monkeypatch.setattr("app.service.requests.post", fake_post)
     monkeypatch.setattr(
-        service, "get_spotify_info", lambda url, user_id=1: track
+        service,
+        "get_spotify_info",
+        lambda *args, **kwargs: pytest.fail("unregistered command must not run"),
     )
-    monkeypatch.setattr(
-        service, "download_spotify", lambda track_arg, output_id, user_id=1: audio
-    )
-    monkeypatch.setattr(service, "_publish_spotify_to_telegram", fake_publish)
 
     service.process_telegram_update(
         {
@@ -815,34 +792,59 @@ def test_telegram_spotify_command_registers_admin_chat_and_publishes(
         1,
     )
 
-    destination = service.storage.telegram_destination("-100999")
-    assert destination.name == "Music chat"
-    assert destination.bot_token == "command-token"
-    assert published == {
-        "track": track,
-        "path": audio,
-        "bot_token": "command-token",
-        "chat_id": "-100999",
-        "kwargs": {"caption_html": None, "message_thread_id": 17},
+    assert "-100999" not in {
+        destination.chat_id
+        for destination in service.storage.telegram_destinations()
     }
-    assert calls[0] == (
+    assert calls == [
+        (
         "sendMessage",
         {
             "chat_id": "-100999",
-            "text": "Готовлю MP3 320 кбит/с…",
+            "text": "Сначала добавьте чат в настройках ClipRelay",
             "message_thread_id": 17,
         },
+        )
+    ]
+
+
+def test_telegram_membership_update_does_not_register_chat(
+    tmp_path, monkeypatch
+) -> None:
+    service = TikTokToTelegram(make_service_config(tmp_path))
+    monkeypatch.setattr(
+        "app.service.requests.post",
+        lambda *args, **kwargs: pytest.fail("membership update must be ignored"),
     )
-    assert calls[-1] == (
-        "deleteMessage",
-        {"chat_id": "-100999", "message_id": 73},
+
+    service.process_telegram_update(
+        {
+            "my_chat_member": {
+                "chat": {
+                    "id": -100999,
+                    "title": "Music chat",
+                    "type": "supergroup",
+                },
+                "new_chat_member": {"status": "administrator"},
+            }
+        },
+        "command-token",
+        1,
     )
+
+    assert "-100999" not in {
+        destination.chat_id
+        for destination in service.storage.telegram_destinations()
+    }
 
 
 def test_telegram_spotify_command_reads_link_from_replied_message(
     tmp_path, monkeypatch
 ) -> None:
     service = TikTokToTelegram(make_service_config(tmp_path))
+    service.storage.add_telegram_destination(
+        "Private chat", "123", "token", destination_type="private"
+    )
     captured = {}
     track = SpotifyTrack(
         "4uLU6hMCjMI75M1A2tKUQC",
@@ -900,6 +902,9 @@ def test_telegram_spotify_search_finds_and_publishes_track(
     tmp_path, monkeypatch
 ) -> None:
     service = TikTokToTelegram(make_service_config(tmp_path))
+    service.storage.add_telegram_destination(
+        "Private chat", "123", "command-token", destination_type="private"
+    )
     audio = tmp_path / "aria-math.mp3"
     audio.write_bytes(b"mp3")
     track = SpotifyTrack(
@@ -993,6 +998,9 @@ def test_telegram_instagram_command_publishes_carousel_and_cleans_files(
     tmp_path, monkeypatch
 ) -> None:
     service = TikTokToTelegram(make_service_config(tmp_path))
+    service.storage.add_telegram_destination(
+        "Private chat", "123", "command-token", destination_type="private"
+    )
     first = tmp_path / "first.jpg"
     second = tmp_path / "second.jpg"
     first.write_bytes(b"one")
@@ -1451,6 +1459,12 @@ def test_service_updates_uploaded_cookies_without_restart(tmp_path) -> None:
     assert path == tmp_path / "users" / "1" / "instagram-cookies.txt"
     assert service.instagram_cookies_file == path
     assert path.read_bytes() == b"# Netscape HTTP Cookie File\n"
+    assert service.cookie_status("instagram") == {
+        "uploaded": True,
+        "valid": False,
+        "reason": "empty",
+        "cookie_count": 0,
+    }
 
 
 def test_service_requires_sp_dc_in_uploaded_spotify_cookies(tmp_path) -> None:
@@ -1485,6 +1499,80 @@ def test_service_requires_sp_dc_in_uploaded_spotify_cookies(tmp_path) -> None:
     )
     assert path == tmp_path / "users" / "1" / "spotify-cookies.txt"
     assert has_spotify_auth_cookie(path)
+
+
+@pytest.mark.parametrize(
+    ("service_name", "auth_cookie_name"),
+    [
+        ("tiktok", "sessionid"),
+        ("instagram", "sessionid"),
+        ("youtube", "LOGIN_INFO"),
+        ("spotify", "sp_dc"),
+        ("twitter", "auth_token"),
+        ("reddit", "reddit_session"),
+    ],
+)
+def test_cookie_status_recognizes_active_service_auth_cookies(
+    tmp_path, service_name, auth_cookie_name
+) -> None:
+    service = TikTokToTelegram(make_service_config(tmp_path))
+    service.update_cookies(
+        service_name,
+        (
+            "# Netscape HTTP Cookie File\n"
+            f".example.com\tTRUE\t/\tTRUE\t0\t{auth_cookie_name}\tsecret\n"
+        ).encode(),
+    )
+
+    assert service.cookie_status(service_name) == {
+        "uploaded": True,
+        "valid": True,
+        "reason": "ready",
+        "cookie_count": 1,
+    }
+
+
+def test_cookie_status_reports_missing_malformed_expired_and_non_auth_files(
+    tmp_path,
+) -> None:
+    service = TikTokToTelegram(make_service_config(tmp_path))
+
+    assert service.cookie_status("twitter") == {
+        "uploaded": False,
+        "valid": False,
+        "reason": "missing",
+        "cookie_count": 0,
+    }
+
+    service.update_cookies(
+        "twitter",
+        b"# Netscape HTTP Cookie File\nnot-a-cookie\n",
+    )
+    assert service.cookie_status("twitter")["reason"] == "invalid_format"
+
+    service.update_cookies(
+        "twitter",
+        b"# Netscape HTTP Cookie File\n"
+        b".x.com\tTRUE\t/\tTRUE\t1\tauth_token\tsecret\n",
+    )
+    assert service.cookie_status("twitter") == {
+        "uploaded": True,
+        "valid": False,
+        "reason": "expired",
+        "cookie_count": 0,
+    }
+
+    service.update_cookies(
+        "twitter",
+        b"# Netscape HTTP Cookie File\n"
+        b".x.com\tTRUE\t/\tTRUE\t0\tct0\tcsrf-token\n",
+    )
+    assert service.cookie_status("twitter") == {
+        "uploaded": True,
+        "valid": False,
+        "reason": "missing_auth_cookie",
+        "cookie_count": 1,
+    }
 
 
 def test_service_startup_keeps_active_spotify_download_directory(tmp_path) -> None:
@@ -1785,3 +1873,638 @@ def test_service_replaces_old_public_username_after_channel_tag_change(
     by_chat_id = {item.chat_id: item for item in destinations}
     assert "@old_public" not in by_chat_id
     assert by_chat_id["@new_public"].telegram_id == "-1001234567890"
+
+
+@pytest.mark.parametrize(
+    ("url", "platform"),
+    [
+        ("https://x.com/creator/status/1900000000000000001", "twitter"),
+        ("https://x.com/i/status/1900000000000000003", "twitter"),
+        ("https://twitter.com/i/web/status/1900000000000000002", "twitter"),
+        (
+            "https://www.reddit.com/r/python/comments/abc123/a_useful_post/",
+            "reddit",
+        ),
+        (
+            "https://www.reddit.com/r/python/comments/abc123/a_post/comment42/",
+            "reddit",
+        ),
+        ("https://www.reddit.com/r/pics/gallery/abc123", "reddit"),
+        ("https://redd.it/abc123", "reddit"),
+    ],
+)
+def test_social_url_registry_detects_supported_posts(url, platform) -> None:
+    assert detect_media_platform(url) == platform
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://x.com/creator",
+        "https://x.com/creator/status/not-a-number",
+        "https://x.com.evil.test/creator/status/1900000000000000001",
+    ],
+)
+def test_twitter_url_validation_rejects_non_posts(url) -> None:
+    with pytest.raises(ValueError):
+        validate_twitter_url(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.reddit.com/r/python/",
+        "https://i.redd.it/image.jpg",
+        "https://reddit.com.evil.test/r/python/comments/abc123/post/",
+    ],
+)
+def test_reddit_url_validation_rejects_non_posts(url) -> None:
+    with pytest.raises(ValueError):
+        validate_reddit_url(url)
+
+
+def test_parse_twitter_photo_post_is_pure_and_preserves_metadata() -> None:
+    post = parse_twitter_post(
+        {
+            "id_str": "1900000000000000001",
+            "full_text": "Photo caption",
+            "created_at": "Sat Aug 01 10:00:00 +0000 2026",
+            "user": {"screen_name": "creator"},
+            "mediaDetails": [
+                {
+                    "type": "photo",
+                    "media_url_https": "https://pbs.twimg.com/media/one.jpg?format=jpg",
+                },
+                {
+                    "type": "photo",
+                    "media_url_https": "https://pbs.twimg.com/media/two.jpg",
+                },
+            ],
+        },
+        "https://x.com/creator/status/1900000000000000001",
+    )
+
+    assert post.post_id == "1900000000000000001"
+    assert post.username == "creator"
+    assert post.description == "Photo caption"
+    assert post.platform == "twitter"
+    assert post.author_url == "https://x.com/creator"
+    assert post.media_type == "image"
+    assert len(post.image_urls) == 2
+    assert all("name=orig" in url for url in post.image_urls)
+
+
+@pytest.mark.parametrize(
+    ("media_details", "expected_type"),
+    [
+        ([], "text"),
+        ([{"type": "video", "video_info": {"variants": []}}], "video"),
+    ],
+)
+def test_parse_twitter_text_and_video_posts(media_details, expected_type) -> None:
+    post = parse_twitter_post(
+        {
+            "id_str": "1900000000000000002",
+            "text": "Post body",
+            "user": {"screen_name": "creator"},
+            "mediaDetails": media_details,
+        },
+        "https://twitter.com/creator/status/1900000000000000002",
+    )
+
+    assert post.media_type == expected_type
+    assert post.description == "Post body"
+
+
+def test_parse_reddit_gallery_post_preserves_order_and_metadata() -> None:
+    post = parse_reddit_post(
+        [
+            {
+                "data": {
+                    "children": [
+                        {
+                            "data": {
+                                "id": "abc123",
+                                "author": "poster",
+                                "title": "Gallery title",
+                                "selftext": "Gallery body",
+                                "created_utc": 1785578400,
+                                "permalink": "/r/pics/comments/abc123/gallery_title/",
+                                "gallery_data": {
+                                    "items": [
+                                        {"media_id": "second"},
+                                        {"media_id": "first"},
+                                    ]
+                                },
+                                "media_metadata": {
+                                    "first": {
+                                        "e": "Image",
+                                        "s": {"u": "https://i.redd.it/first.jpg"},
+                                    },
+                                    "second": {
+                                        "e": "Image",
+                                        "s": {
+                                            "u": "https://preview.redd.it/second.jpg?a=1&amp;b=2"
+                                        },
+                                    },
+                                },
+                            }
+                        }
+                    ]
+                }
+            }
+        ],
+        "https://www.reddit.com/gallery/abc123",
+    )
+
+    assert post.post_id == "abc123"
+    assert post.username == "poster"
+    assert post.description == "Gallery title\n\nGallery body"
+    assert post.webpage_url == (
+        "https://www.reddit.com/r/pics/comments/abc123/gallery_title/"
+    )
+    assert post.author_url == "https://www.reddit.com/user/poster/"
+    assert post.media_type == "image"
+    assert post.image_urls == (
+        "https://preview.redd.it/second.jpg?a=1&b=2",
+        "https://i.redd.it/first.jpg",
+    )
+
+
+def test_parse_reddit_single_image_and_text_posts() -> None:
+    image = parse_reddit_post(
+        {
+            "id": "image1",
+            "author": "poster",
+            "title": "Image title",
+            "post_hint": "image",
+            "url_overridden_by_dest": "https://i.redd.it/image1.png",
+        },
+        "https://redd.it/image1",
+    )
+    text_post = parse_reddit_post(
+        {
+            "id": "text1",
+            "author": "writer",
+            "title": "Question",
+            "selftext": "Long-form answer",
+        },
+        "https://www.reddit.com/r/test/comments/text1/question/",
+    )
+
+    assert image.media_type == "image"
+    assert image.image_urls == ("https://i.redd.it/image1.png",)
+    assert text_post.media_type == "text"
+    assert text_post.description == "Question\n\nLong-form answer"
+    assert text_post.image_urls == ()
+
+
+def test_parse_reddit_crosspost_uses_original_video_metadata() -> None:
+    post = parse_reddit_post(
+        {
+            "id": "wrapper1",
+            "author": "crossposter",
+            "title": "Crosspost",
+            "url_overridden_by_dest": (
+                "https://www.reddit.com/r/videos/comments/original/video/"
+            ),
+            "crosspost_parent_list": [
+                {
+                    "id": "original",
+                    "is_video": True,
+                    "secure_media": {
+                        "reddit_video": {
+                            "fallback_url": "https://v.redd.it/video/DASH_720.mp4"
+                        }
+                    },
+                }
+            ],
+        },
+        "https://www.reddit.com/r/test/comments/wrapper1/crosspost/",
+    )
+
+    assert post.post_id == "wrapper1"
+    assert post.username == "crossposter"
+    assert post.media_type == "video"
+
+
+def test_prepare_twitter_photo_and_text_posts_without_real_network(
+    tmp_path, monkeypatch
+) -> None:
+    service = TikTokToTelegram(make_service_config(tmp_path))
+    image_path = tmp_path / "tweet.jpg"
+    image_path.write_bytes(b"image")
+    photo_post = MediaSourcePost(
+        "1900000000000000001",
+        "creator",
+        "Photo caption",
+        "https://x.com/creator/status/1900000000000000001",
+        1785578400,
+        "twitter",
+        "https://x.com/creator",
+        "image",
+        ("https://pbs.twimg.com/media/photo.jpg?name=orig",),
+    )
+    text_post = MediaSourcePost(
+        "1900000000000000002",
+        "writer",
+        "A text-only post",
+        "https://x.com/writer/status/1900000000000000002",
+        1785578401,
+        "twitter",
+        "https://x.com/writer",
+        "text",
+    )
+    posts = iter((photo_post, text_post))
+    downloaded = {}
+
+    monkeypatch.setattr(
+        service,
+        "_social_post_info",
+        lambda url, platform, user_id: next(posts),
+    )
+
+    def fake_download_images(urls, output_id, cookies_file):
+        downloaded.update(
+            urls=urls,
+            output_id=output_id,
+            cookies_file=cookies_file,
+        )
+        return (image_path,)
+
+    monkeypatch.setattr(service, "_download_images", fake_download_images)
+
+    photo, photo_paths = service.prepare_url(photo_post.webpage_url)
+    text, text_paths = service.prepare_url(text_post.webpage_url)
+
+    assert photo == service._video_from_source_post(photo_post)
+    assert photo_paths == (image_path,)
+    assert downloaded["urls"] == list(photo_post.image_urls)
+    assert downloaded["output_id"].startswith("manual-")
+    assert downloaded["cookies_file"] is None
+    assert text == service._video_from_source_post(text_post)
+    assert text.media_type == "text"
+    assert text_paths == ()
+
+
+def test_prepare_reddit_video_keeps_all_downloaded_files(
+    tmp_path, monkeypatch
+) -> None:
+    service = TikTokToTelegram(make_service_config(tmp_path))
+    first = tmp_path / "first.mp4"
+    second = tmp_path / "second.mp4"
+    first.write_bytes(b"one")
+    second.write_bytes(b"two")
+    source_post = MediaSourcePost(
+        "abc123",
+        "poster",
+        "Two clips",
+        "https://www.reddit.com/r/videos/comments/abc123/two_clips/",
+        1785578400,
+        "reddit",
+        "https://www.reddit.com/user/poster/",
+        "video",
+    )
+    captured = {}
+
+    monkeypatch.setattr(
+        service,
+        "_social_post_info",
+        lambda url, platform, user_id: source_post,
+    )
+
+    def fake_download(url, platform, output_id, user_id):
+        captured.update(
+            url=url,
+            platform=platform,
+            output_id=output_id,
+            user_id=user_id,
+        )
+        return {"id": source_post.post_id}, (first, second)
+
+    monkeypatch.setattr(service, "_download_video_files", fake_download)
+
+    video, paths = service.prepare_url(source_post.webpage_url)
+
+    assert video == service._video_from_source_post(source_post)
+    assert paths == (first, second)
+    assert captured["platform"] == "reddit"
+    assert captured["output_id"].startswith("manual-")
+
+
+def test_twitter_metadata_falls_back_to_uploaded_cookies(
+    tmp_path, monkeypatch
+) -> None:
+    service = TikTokToTelegram(make_service_config(tmp_path))
+    service.update_cookies(
+        "twitter",
+        (
+            b"# Netscape HTTP Cookie File\n"
+            b".x.com\tTRUE\t/\tTRUE\t0\tauth_token\tsecret\n"
+        ),
+    )
+    expected = MediaSourcePost(
+        "1900000000000000001",
+        "creator",
+        "Private post",
+        "https://x.com/creator/status/1900000000000000001",
+        0,
+        "twitter",
+        "https://x.com/creator",
+        "text",
+    )
+    monkeypatch.setattr(
+        "app.service.fetch_twitter_syndication_post",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("restricted")),
+    )
+    monkeypatch.setattr(
+        service,
+        "_twitter_authenticated_post_info",
+        lambda url, user_id: expected,
+    )
+
+    assert (
+        service._social_post_info(expected.webpage_url, "twitter", 1)
+        == expected
+    )
+    assert service._cookie_file("twitter", 1) == (
+        tmp_path / "users" / "1" / "twitter-cookies.txt"
+    )
+
+
+@pytest.mark.parametrize("platform", ["twitter", "reddit"])
+def test_service_updates_social_cookies_without_restart(
+    tmp_path, platform
+) -> None:
+    service = TikTokToTelegram(make_service_config(tmp_path))
+    content = (
+        b"# Netscape HTTP Cookie File\n"
+        b".example.test\tTRUE\t/\tTRUE\t0\tsession\tsecret\n"
+    )
+
+    path = service.update_cookies(platform, content)
+
+    assert path == tmp_path / "users" / "1" / f"{platform}-cookies.txt"
+    assert service._cookie_file(platform, 1) == path
+    assert path.read_bytes() == content
+
+
+def test_processed_media_keys_namespace_new_sources_and_preserve_tiktok(
+    tmp_path,
+) -> None:
+    service = TikTokToTelegram(make_service_config(tmp_path))
+    tiktok = Video(
+        "same-id",
+        "creator",
+        "",
+        "https://www.tiktok.com/@creator/video/same-id",
+        0,
+    )
+    twitter = Video(
+        "same-id",
+        "creator",
+        "",
+        "https://x.com/creator/status/1900000000000000001",
+        0,
+        platform="twitter",
+    )
+    reddit = Video(
+        "same-id",
+        "creator",
+        "",
+        "https://redd.it/same-id",
+        0,
+        platform="reddit",
+    )
+
+    for video in (tiktok, twitter, reddit):
+        service.mark_processed(video)
+
+    assert processed_media_key(tiktok) == "same-id"
+    assert processed_media_key(twitter) == "twitter:same-id"
+    assert processed_media_key(reddit) == "reddit:same-id"
+    assert service.storage.has("same-id")
+    assert service.storage.has("twitter:same-id")
+    assert service.storage.has("reddit:same-id")
+
+
+def test_publish_text_post_uses_send_message_and_4096_limit(
+    tmp_path, monkeypatch
+) -> None:
+    service = TikTokToTelegram(make_service_config(tmp_path))
+    captured = {}
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"ok": True}
+
+    def fake_post(url, data, timeout):
+        captured.update(url=url, data=dict(data), timeout=timeout)
+        return Response()
+
+    monkeypatch.setattr("app.service.requests.post", fake_post)
+    post = Video(
+        "text1",
+        "writer",
+        "x" * 5000,
+        "https://www.reddit.com/r/test/comments/text1/post/",
+        0,
+        platform="reddit",
+        author_url="https://www.reddit.com/user/writer/",
+        media_type="text",
+    )
+
+    service.publish(post, ())
+
+    assert captured["url"].endswith("/sendMessage")
+    assert captured["data"]["chat_id"] == "@main"
+    assert captured["data"]["parse_mode"] == "HTML"
+    assert len(captured["data"]["text"]) <= 4096
+    assert "blockquote" in captured["data"]["text"]
+
+
+def test_publish_text_custom_html_can_exceed_media_caption_limit(
+    tmp_path, monkeypatch
+) -> None:
+    service = TikTokToTelegram(make_service_config(tmp_path))
+    captured = {}
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"ok": True}
+
+    monkeypatch.setattr(
+        "app.service.requests.post",
+        lambda url, data, timeout: (
+            captured.update(url=url, data=dict(data)) or Response()
+        ),
+    )
+    post = Video(
+        "text2",
+        "writer",
+        "Fallback",
+        "https://x.com/writer/status/1900000000000000002",
+        0,
+        platform="twitter",
+        author_url="https://x.com/writer",
+        media_type="text",
+    )
+    custom = f"<b>{'y' * 1500}</b><script>safe text</script>"
+
+    service.publish(post, (), caption_html=custom)
+
+    assert captured["url"].endswith("/sendMessage")
+    assert len(captured["data"]["text"]) > 1024
+    assert len(captured["data"]["text"]) <= 4096
+    assert "<script>" not in captured["data"]["text"]
+    assert "safe text" in captured["data"]["text"]
+
+
+def test_publish_multiple_videos_uses_media_group_with_every_file(
+    tmp_path, monkeypatch
+) -> None:
+    service = TikTokToTelegram(make_service_config(tmp_path))
+    first = tmp_path / "first.mp4"
+    second = tmp_path / "second.webm"
+    first.write_bytes(b"one")
+    second.write_bytes(b"two")
+    captured = {}
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"ok": True}
+
+    def fake_post(url, data, files, timeout):
+        captured.update(
+            url=url,
+            data=dict(data),
+            files=tuple(files),
+            timeout=timeout,
+        )
+        return Response()
+
+    monkeypatch.setattr("app.service.requests.post", fake_post)
+    post = Video(
+        "video1",
+        "creator",
+        "Two clips",
+        "https://x.com/creator/status/1900000000000000001",
+        0,
+        platform="twitter",
+        media_type="video",
+    )
+
+    service._publish_media_to_telegram(
+        post,
+        (first, second),
+        "token",
+        "@main",
+        "Caption",
+    )
+
+    assert captured["url"].endswith("/sendMediaGroup")
+    assert captured["files"] == ("video0", "video1")
+    media = json.loads(captured["data"]["media"])
+    assert [item["type"] for item in media] == ["video", "video"]
+    assert all(item["supports_streaming"] for item in media)
+    assert media[0]["caption"] == "Caption"
+
+
+@pytest.mark.parametrize(
+    ("command", "url", "platform"),
+    [
+        (
+            "/x",
+            "https://x.com/writer/status/1900000000000000002",
+            "twitter",
+        ),
+        (
+            "/twitter",
+            "https://twitter.com/writer/status/1900000000000000002",
+            "twitter",
+        ),
+        (
+            "/reddit",
+            "https://www.reddit.com/r/test/comments/text1/post/",
+            "reddit",
+        ),
+    ],
+)
+def test_telegram_social_commands_publish_in_registered_chat(
+    tmp_path, monkeypatch, command, url, platform
+) -> None:
+    service = TikTokToTelegram(make_service_config(tmp_path))
+    service.storage.add_telegram_destination(
+        "Private chat", "123", "command-token", destination_type="private"
+    )
+    video = Video(
+        "post-id",
+        "writer",
+        "Text post",
+        url,
+        0,
+        platform=platform,
+        media_type="text",
+    )
+    published = {}
+
+    class Response:
+        def json(self):
+            return {"ok": True, "result": {"message_id": 77}}
+
+    monkeypatch.setattr(
+        "app.service.requests.post",
+        lambda *args, **kwargs: Response(),
+    )
+
+    def fake_prepare(prepared_url, user_id):
+        assert prepared_url == url
+        assert user_id == 1
+        return video, ()
+
+    def fake_publish(
+        video_arg,
+        paths,
+        bot_token,
+        chat_id,
+        caption,
+        **kwargs,
+    ):
+        published.update(
+            video=video_arg,
+            paths=paths,
+            bot_token=bot_token,
+            chat_id=chat_id,
+            caption=caption,
+            kwargs=kwargs,
+        )
+
+    monkeypatch.setattr(service, "prepare_url", fake_prepare)
+    monkeypatch.setattr(service, "_publish_media_to_telegram", fake_publish)
+
+    service.process_telegram_update(
+        {
+            "message": {
+                "text": f"{command} {url}",
+                "chat": {"id": 123, "type": "private"},
+                "from": {"id": 42},
+            }
+        },
+        "command-token",
+        1,
+    )
+
+    assert published["video"] == video
+    assert published["paths"] == ()
+    assert published["bot_token"] == "command-token"
+    assert published["chat_id"] == "123"
+    assert "Text post" in published["caption"]

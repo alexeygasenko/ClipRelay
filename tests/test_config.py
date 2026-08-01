@@ -56,6 +56,10 @@ youtube:
   cookies_file: youtube-cookies.txt
 spotify:
   cookies_file: spotify-cookies.txt
+twitter:
+  cookies_file: twitter-cookies.txt
+reddit:
+  cookies_file: reddit-cookies.txt
 """,
         encoding="utf-8",
     )
@@ -67,6 +71,8 @@ spotify:
     assert config.instagram_cookies_file == tmp_path / "instagram-cookies.txt"
     assert config.youtube_cookies_file == tmp_path / "youtube-cookies.txt"
     assert config.spotify_cookies_file == tmp_path / "spotify-cookies.txt"
+    assert config.twitter_cookies_file == tmp_path / "twitter-cookies.txt"
+    assert config.reddit_cookies_file == tmp_path / "reddit-cookies.txt"
 
 
 def test_environment_overrides_yaml(tmp_path: Path, monkeypatch) -> None:

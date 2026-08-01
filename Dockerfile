@@ -1,3 +1,14 @@
+FROM node:24-alpine AS frontend
+
+WORKDIR /build
+
+COPY frontend/package.json frontend/package-lock.json ./frontend/
+RUN cd frontend && npm ci
+
+COPY frontend/index.html frontend/vite.config.js ./frontend/
+COPY frontend/src ./frontend/src
+RUN cd frontend && npm run build
+
 FROM denoland/deno:bin-2.5.6 AS deno
 
 FROM python:3.13-slim
@@ -20,6 +31,7 @@ RUN python -m venv /opt/spotify-player \
 ENV SPOTIFY_PLAYER_PYTHON=/opt/spotify-player/bin/python
 
 COPY app ./app
+COPY --from=frontend /build/app/static/frontend ./app/static/frontend
 
 RUN useradd --create-home app \
     && mkdir -p /data \

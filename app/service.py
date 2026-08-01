@@ -25,10 +25,27 @@ import requests
 import yt_dlp
 
 from app.config import Config, TelegramChannel
+from app.media_sources import (
+    MEDIA_SOURCE_REGISTRY,
+    MediaSourcePost,
+    detect_media_platform,
+    fetch_reddit_post,
+    fetch_twitter_syndication_post,
+    is_reddit_url,
+    is_twitter_url,
+    parse_twitter_post,
+    reddit_post_id_from_url,
+    reddit_url_from_text,
+    twitter_post_id_from_url,
+    twitter_url_from_text,
+    validate_reddit_url,
+    validate_twitter_url,
+)
 from app.storage import Storage, User
 
 LOGGER = logging.getLogger(__name__)
 MAX_CAPTION_LENGTH = 1024
+MAX_MESSAGE_LENGTH = 4096
 MAX_VIDEO_BYTES = 49 * 1024 * 1024
 STALE_DOWNLOAD_SECONDS = 24 * 60 * 60
 YOUTUBE_AUTH_COOKIE_NAMES = {
@@ -40,6 +57,14 @@ YOUTUBE_AUTH_COOKIE_NAMES = {
     "LOGIN_INFO",
     "__Secure-1PSID",
     "__Secure-3PSID",
+}
+SERVICE_AUTH_COOKIE_NAMES = {
+    "tiktok": frozenset({"sessionid", "sessionid_ss", "sid_tt"}),
+    "instagram": frozenset({"sessionid"}),
+    "youtube": frozenset(YOUTUBE_AUTH_COOKIE_NAMES),
+    "spotify": frozenset({"sp_dc"}),
+    "twitter": frozenset({"auth_token"}),
+    "reddit": frozenset({"reddit_session", "token_v2"}),
 }
 INSTAGRAM_SHORTCODE_ALPHABET = (
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
@@ -55,7 +80,7 @@ SPOTIFY_TRACK_URL_IN_TEXT_RE = re.compile(
     flags=re.IGNORECASE,
 )
 TELEGRAM_DOWNLOAD_COMMAND_RE = re.compile(
-    r"^/(?P<command>spotifysearch|spotify|instagram)"
+    r"^/(?P<command>spotifysearch|spotify|instagram|twitter|reddit|x)"
     r"(?:@[A-Za-z0-9_]+)?(?:\s|$)",
     flags=re.IGNORECASE,
 )
@@ -89,6 +114,12 @@ class Video:
     platform: str = "tiktok"
     author_url: str = ""
     media_type: str = "video"
+
+
+def processed_media_key(video: Video) -> str:
+    if video.platform == "tiktok":
+        return video.video_id
+    return f"{video.platform}:{video.video_id}"
 
 
 @dataclass(frozen=True)
@@ -172,14 +203,17 @@ class TelegramHTMLSanitizer(HTMLParser):
         )
 
 
-def sanitize_telegram_html(value: str) -> str:
+def sanitize_telegram_html(
+    value: str,
+    max_length: int = MAX_CAPTION_LENGTH,
+) -> str:
     parser = TelegramHTMLSanitizer()
     parser.feed(value or "")
     parser.close_open_tags()
     text = re.sub(r"\n{3,}", "\n\n", "".join(parser.parts)).strip()
-    if len(text) > MAX_CAPTION_LENGTH:
+    if len(text) > max_length:
         raise ValueError(
-            f"Подпись слишком длинная: {len(text)} символов HTML при лимите {MAX_CAPTION_LENGTH}."
+            f"Текст слишком длинный: {len(text)} символов HTML при лимите {max_length}."
         )
     return text
 
@@ -367,6 +401,24 @@ def media_author_from_info(
         if not username:
             username = "instagram"
         return username, f"https://www.instagram.com/{username}/"
+    if platform == "twitter":
+        username = str(
+            info.get("uploader_id")
+            or info.get("channel")
+            or info.get("uploader")
+            or "twitter"
+        ).strip().lstrip("@")
+        author_url = str(info.get("uploader_url") or "").strip()
+        return username, author_url or f"https://x.com/{username}"
+    if platform == "reddit":
+        username = str(
+            info.get("uploader")
+            or info.get("uploader_id")
+            or info.get("channel")
+            or "reddit"
+        ).strip().lstrip("@")
+        author_url = str(info.get("uploader_url") or "").strip()
+        return username, author_url or f"https://www.reddit.com/user/{username}/"
     username = username_from_info(info, webpage_url)
     return username, f"https://www.tiktok.com/@{username}"
 
@@ -588,6 +640,7 @@ def build_caption(
     after_text: str = "",
     include_author: bool = True,
     include_description: bool = True,
+    max_length: int = MAX_CAPTION_LENGTH,
 ) -> str:
     author = html.escape(f"@{video.username}")
     author_url = html.escape(
@@ -618,14 +671,14 @@ def build_caption(
         return "\n\n".join(sections)
 
     caption = render(texts)
-    if len(caption) <= MAX_CAPTION_LENGTH:
+    if len(caption) <= max_length:
         return caption
 
     low, high = 0, max(len(text) for text in texts)
     while low < high:
         middle = (low + high + 1) // 2
         candidate = render([text[:middle] for text in texts], truncated=True)
-        if len(candidate) <= MAX_CAPTION_LENGTH:
+        if len(candidate) <= max_length:
             low = middle
         else:
             high = middle - 1
@@ -710,10 +763,11 @@ def build_spotify_caption(
 def resolve_caption_html(
     caption_html: str | None = None,
     fallback: str = "",
+    max_length: int = MAX_CAPTION_LENGTH,
 ) -> str:
     if caption_html is None:
         return fallback
-    return sanitize_telegram_html(caption_html)
+    return sanitize_telegram_html(caption_html, max_length=max_length)
 
 
 class TikTokToTelegram:
@@ -769,8 +823,14 @@ class TikTokToTelegram:
         self.spotify_cookies_file = self._writable_cookie_copy(
             self.config.spotify_cookies_file, "spotify-cookies.txt", user_id=1
         )
+        self.twitter_cookies_file = self._writable_cookie_copy(
+            self.config.twitter_cookies_file, "twitter-cookies.txt", user_id=1
+        )
+        self.reddit_cookies_file = self._writable_cookie_copy(
+            self.config.reddit_cookies_file, "reddit-cookies.txt", user_id=1
+        )
         self.spotify_lock = threading.Lock()
-        self.telegram_commands_initialized: set[tuple[str, bool, bool]] = set()
+        self.telegram_commands_initialized: set[tuple[str, tuple[str, ...]]] = set()
         self.telegram_poll_errors: set[str] = set()
 
     def _user_data_dir(self, user_id: int) -> Path:
@@ -801,12 +861,98 @@ class TikTokToTelegram:
             "instagram": "instagram-cookies.txt",
             "youtube": "youtube-cookies.txt",
             "spotify": "spotify-cookies.txt",
+            "twitter": "twitter-cookies.txt",
+            "reddit": "reddit-cookies.txt",
         }
         filename = filenames.get(service_name)
         if not filename:
             return None
         path = self._user_data_dir(user_id) / filename
         return path if path.is_file() else None
+
+    def cookie_status(self, service_name: str, user_id: int = 1) -> dict[str, object]:
+        """Inspect an uploaded Netscape cookie file without making a network request."""
+        def result(
+            uploaded: bool,
+            valid: bool,
+            reason: str,
+            cookie_count: int = 0,
+        ) -> dict[str, object]:
+            return {
+                "uploaded": uploaded,
+                "valid": valid,
+                "reason": reason,
+                "cookie_count": cookie_count,
+            }
+
+        path = self._cookie_file(service_name, user_id)
+        if not path:
+            return result(False, False, "missing")
+
+        try:
+            content = path.read_bytes()
+        except OSError:
+            return result(True, False, "read_error")
+        if b"Netscape HTTP Cookie File" not in content[:256]:
+            return result(True, False, "invalid_format")
+
+        try:
+            lines = content.decode("utf-8-sig").splitlines()
+        except UnicodeError:
+            return result(True, False, "invalid_format")
+
+        cookies: list[tuple[str, str, int]] = []
+        for raw_line in lines:
+            if not raw_line.strip():
+                continue
+            if raw_line.startswith("#HttpOnly_"):
+                line = raw_line.removeprefix("#HttpOnly_")
+            elif raw_line.startswith("#"):
+                continue
+            else:
+                line = raw_line
+            parts = line.split("\t")
+            if len(parts) != 7:
+                return result(True, False, "invalid_format")
+            domain, include_subdomains, cookie_path, secure, expires, name, value = parts
+            if (
+                not domain
+                or include_subdomains not in {"TRUE", "FALSE"}
+                or not cookie_path
+                or secure not in {"TRUE", "FALSE"}
+                or not name
+                or (include_subdomains == "TRUE") != domain.startswith(".")
+            ):
+                return result(True, False, "invalid_format")
+            try:
+                expires_at = int(expires)
+            except ValueError:
+                return result(True, False, "invalid_format")
+            if expires_at < 0:
+                return result(True, False, "invalid_format")
+            cookies.append((name, value, expires_at))
+
+        if not cookies:
+            return result(True, False, "empty")
+        if not any(value for _, value, _ in cookies):
+            return result(True, False, "empty")
+
+        now = time.time()
+        active_cookies = tuple(
+            (name, value)
+            for name, value, expires_at in cookies
+            if value and (expires_at == 0 or expires_at > now)
+        )
+        if not active_cookies:
+            return result(True, False, "expired")
+
+        required_names = SERVICE_AUTH_COOKIE_NAMES.get(service_name, frozenset())
+        if required_names and not any(
+            name in required_names for name, _ in active_cookies
+        ):
+            return result(True, False, "missing_auth_cookie", len(active_cookies))
+
+        return result(True, True, "ready", len(active_cookies))
 
     def user(self, user_id: int) -> User:
         user = self.storage.get_user(user_id)
@@ -820,6 +966,16 @@ class TikTokToTelegram:
             raise PermissionError("Пользователь отключён")
         if not user.allows(service_name):
             raise PermissionError(f"Сервис {service_name} отключён для пользователя")
+
+    def mark_processed(self, video: Video, user_id: int = 1) -> None:
+        self.storage.mark(
+            processed_media_key(video),
+            video.username,
+            user_id,
+        )
+
+    def is_processed(self, video: Video, user_id: int = 1) -> bool:
+        return self.storage.has(processed_media_key(video), user_id)
 
     def telegram_channels(self, user_id: int = 1) -> tuple[TelegramChannel, ...]:
         return tuple(
@@ -988,7 +1144,12 @@ class TikTokToTelegram:
     def _telegram_bot_owners(self) -> dict[str, int]:
         owners: dict[str, int] = {}
         for user in self.storage.active_users():
-            if not (user.allow_spotify or user.allow_instagram):
+            if not (
+                user.allow_spotify
+                or user.allow_instagram
+                or user.allow_twitter
+                or user.allow_reddit
+            ):
                 continue
             for destination in self.storage.telegram_destinations(user.id):
                 token = destination.bot_token.strip()
@@ -998,12 +1159,7 @@ class TikTokToTelegram:
 
     def _ensure_telegram_commands(self, bot_token: str, user_id: int) -> None:
         user = self.storage.get_user(user_id)
-        command_state = (
-            bot_token,
-            user.allow_spotify,
-            user.allow_instagram,
-        )
-        if command_state in self.telegram_commands_initialized:
+        if not user:
             return
         commands = []
         if user.allow_spotify:
@@ -1026,6 +1182,26 @@ class TikTokToTelegram:
                     "description": "Скачать пост по ссылке Instagram",
                 }
             )
+        if user.allow_twitter:
+            commands.append(
+                {
+                    "command": "x",
+                    "description": "Скачать пост по ссылке X / Twitter",
+                }
+            )
+        if user.allow_reddit:
+            commands.append(
+                {
+                    "command": "reddit",
+                    "description": "Скачать пост по ссылке Reddit",
+                }
+            )
+        command_state = (
+            bot_token,
+            tuple(command["command"] for command in commands),
+        )
+        if command_state in self.telegram_commands_initialized:
+            return
         response = requests.post(
             f"https://api.telegram.org/bot{bot_token}/setMyCommands",
             data={
@@ -1063,33 +1239,6 @@ class TikTokToTelegram:
             )
             for destination in self.storage.telegram_destinations(user_id)
         )
-
-    def _telegram_sender_can_register_chat(
-        self,
-        message: dict[str, Any],
-        bot_token: str,
-    ) -> bool:
-        chat = message.get("chat") or {}
-        destination_type = str(chat.get("type") or "")
-        if destination_type == "private" or destination_type == "channel":
-            return True
-        sender_chat = message.get("sender_chat") or {}
-        if sender_chat.get("id") == chat.get("id"):
-            return True
-        sender = message.get("from") or {}
-        if not sender.get("id") or not chat.get("id"):
-            return False
-        try:
-            response = requests.get(
-                f"https://api.telegram.org/bot{bot_token}/getChatMember",
-                params={"chat_id": chat["id"], "user_id": sender["id"]},
-                timeout=30,
-            )
-            payload = response.json()
-        except (requests.RequestException, requests.JSONDecodeError):
-            return False
-        status = str((payload.get("result") or {}).get("status") or "")
-        return bool(payload.get("ok")) and status in {"administrator", "creator"}
 
     @staticmethod
     def _telegram_message_text(message: dict[str, Any]) -> str:
@@ -1175,15 +1324,6 @@ class TikTokToTelegram:
     ) -> None:
         membership = update.get("my_chat_member") or {}
         if membership:
-            status = str(
-                ((membership.get("new_chat_member") or {}).get("status") or "")
-            )
-            if status in {"member", "administrator", "creator"}:
-                self._save_telegram_chat(
-                    dict(membership.get("chat") or {}),
-                    bot_token,
-                    user_id,
-                )
             return
 
         message = update.get("message") or update.get("channel_post") or {}
@@ -1199,16 +1339,13 @@ class TikTokToTelegram:
         message_thread_id = message.get("message_thread_id")
         registered = self._telegram_chat_is_registered(chat, bot_token, user_id)
         if not registered:
-            if not self._telegram_sender_can_register_chat(message, bot_token):
-                self._telegram_send_text(
-                    bot_token,
-                    chat_id,
-                    f"Первую команду /{command} в новом чате должен отправить администратор.",
-                    message_thread_id,
-                )
-                return
-            if str(chat.get("type") or "") in {"channel", "group", "supergroup"}:
-                self._save_telegram_chat(chat, bot_token, user_id)
+            self._telegram_send_text(
+                bot_token,
+                chat_id,
+                "Сначала добавьте чат в настройках ClipRelay",
+                message_thread_id,
+            )
+            return
 
         reply = message.get("reply_to_message") or {}
         link_source = "\n".join(
@@ -1222,6 +1359,26 @@ class TikTokToTelegram:
 
         if command == "instagram":
             self._process_telegram_instagram_command(
+                link_source,
+                bot_token,
+                chat_id,
+                user_id,
+                message_thread_id,
+            )
+            return
+        if command in {"twitter", "x"}:
+            self._process_telegram_social_command(
+                "twitter",
+                link_source,
+                bot_token,
+                chat_id,
+                user_id,
+                message_thread_id,
+            )
+            return
+        if command == "reddit":
+            self._process_telegram_social_command(
+                "reddit",
                 link_source,
                 bot_token,
                 chat_id,
@@ -1374,16 +1531,38 @@ class TikTokToTelegram:
             status_message_id,
         )
 
-    def _process_telegram_instagram_command(
+    def _process_telegram_social_command(
         self,
+        platform: str,
         link_source: str,
         bot_token: str,
         chat_id: str,
         user_id: int,
         message_thread_id: int | None,
     ) -> None:
+        source_options = {
+            "instagram": (
+                instagram_url_from_text,
+                "Instagram",
+                "Скачиваю Instagram-пост…",
+                "Не удалось скачать Instagram-пост",
+            ),
+            "twitter": (
+                twitter_url_from_text,
+                "X / Twitter",
+                "Скачиваю пост X / Twitter…",
+                "Не удалось скачать пост X / Twitter",
+            ),
+            "reddit": (
+                reddit_url_from_text,
+                "Reddit",
+                "Скачиваю пост Reddit…",
+                "Не удалось скачать пост Reddit",
+            ),
+        }
+        parser, _, progress_text, failure_text = source_options[platform]
         try:
-            instagram_url = instagram_url_from_text(link_source)
+            media_url = parser(link_source)
         except ValueError as error:
             self._telegram_send_text(
                 bot_token,
@@ -1396,13 +1575,22 @@ class TikTokToTelegram:
         status_message_id = self._telegram_send_text(
             bot_token,
             chat_id,
-            "Скачиваю Instagram-пост…",
+            progress_text,
             message_thread_id,
         )
         paths: tuple[Path, ...] = ()
         try:
-            video, paths = self.prepare_url(instagram_url, user_id)
-            caption = resolve_caption_html(None, build_caption(video))
+            video, paths = self.prepare_url(media_url, user_id)
+            max_length = (
+                MAX_MESSAGE_LENGTH
+                if video.media_type == "text"
+                else MAX_CAPTION_LENGTH
+            )
+            caption = resolve_caption_html(
+                None,
+                build_caption(video, max_length=max_length),
+                max_length=max_length,
+            )
             self._publish_media_to_telegram(
                 video,
                 paths,
@@ -1413,7 +1601,8 @@ class TikTokToTelegram:
             )
         except Exception as error:
             LOGGER.exception(
-                "Failed to process Telegram Instagram command for user %s",
+                "Failed to process Telegram %s command for user %s",
+                platform,
                 user_id,
             )
             self._telegram_finish_status(
@@ -1421,7 +1610,7 @@ class TikTokToTelegram:
                 chat_id,
                 status_message_id,
                 str(error),
-                "Не удалось скачать Instagram-пост",
+                failure_text,
             )
             return
         finally:
@@ -1431,6 +1620,23 @@ class TikTokToTelegram:
             bot_token,
             chat_id,
             status_message_id,
+        )
+
+    def _process_telegram_instagram_command(
+        self,
+        link_source: str,
+        bot_token: str,
+        chat_id: str,
+        user_id: int,
+        message_thread_id: int | None,
+    ) -> None:
+        self._process_telegram_social_command(
+            "instagram",
+            link_source,
+            bot_token,
+            chat_id,
+            user_id,
+            message_thread_id,
         )
 
     def poll_telegram_commands_once(self) -> int:
@@ -1511,20 +1717,19 @@ class TikTokToTelegram:
             raise ValueError("Файл cookies не должен превышать 5 МБ")
         if b"Netscape HTTP Cookie File" not in content[:256]:
             raise ValueError("Нужен cookies.txt в Netscape-формате")
-        if service_name == "tiktok":
-            destination = self._user_data_dir(user_id) / "tiktok-cookies.txt"
-            attribute = "tiktok_cookies_file"
-        elif service_name == "instagram":
-            destination = self._user_data_dir(user_id) / "instagram-cookies.txt"
-            attribute = "instagram_cookies_file"
-        elif service_name == "youtube":
-            destination = self._user_data_dir(user_id) / "youtube-cookies.txt"
-            attribute = "youtube_cookies_file"
-        elif service_name == "spotify":
-            destination = self._user_data_dir(user_id) / "spotify-cookies.txt"
-            attribute = "spotify_cookies_file"
-        else:
+        cookie_targets = {
+            "tiktok": ("tiktok-cookies.txt", "tiktok_cookies_file"),
+            "instagram": ("instagram-cookies.txt", "instagram_cookies_file"),
+            "youtube": ("youtube-cookies.txt", "youtube_cookies_file"),
+            "spotify": ("spotify-cookies.txt", "spotify_cookies_file"),
+            "twitter": ("twitter-cookies.txt", "twitter_cookies_file"),
+            "reddit": ("reddit-cookies.txt", "reddit_cookies_file"),
+        }
+        target = cookie_targets.get(service_name)
+        if not target:
             raise ValueError("Неизвестный сервис cookies")
+        filename, attribute = target
+        destination = self._user_data_dir(user_id) / filename
         temporary = destination.with_suffix(".tmp")
         temporary.write_bytes(content)
         if service_name == "spotify" and not has_spotify_auth_cookie(temporary):
@@ -1786,6 +1991,120 @@ class TikTokToTelegram:
             raise
         return tuple(paths)
 
+    def _twitter_authenticated_post_info(
+        self,
+        url: str,
+        user_id: int,
+    ) -> MediaSourcePost:
+        cookies_file = self._cookie_file("twitter", user_id)
+        if not cookies_file:
+            raise ValueError("Для этой публикации X / Twitter нужны cookies")
+        post_id = twitter_post_id_from_url(url)
+        if not post_id:
+            raise ValueError("Не удалось определить ID публикации X / Twitter")
+        from yt_dlp.extractor.twitter import TwitterIE
+
+        options = {
+            **self._ydl_options(cookies_file),
+            "skip_download": True,
+        }
+        with self.ydl_lock, yt_dlp.YoutubeDL(options) as ydl:
+            status = TwitterIE(ydl)._extract_status(post_id)
+        return parse_twitter_post(status, url)
+
+    def _social_post_info(
+        self,
+        url: str,
+        platform: str,
+        user_id: int,
+    ) -> MediaSourcePost:
+        cookies_file = self._cookie_file(platform, user_id)
+        if platform == "reddit":
+            session = self._cookie_session(cookies_file)
+            session.headers["User-Agent"] = "ClipRelay/1.0 (Reddit media relay)"
+            return fetch_reddit_post(session, url)
+        if platform != "twitter":
+            raise ValueError(f"Неизвестный источник публикации: {platform}")
+
+        try:
+            return fetch_twitter_syndication_post(
+                self._cookie_session(cookies_file),
+                url,
+            )
+        except Exception as syndication_error:
+            if not cookies_file:
+                raise ValueError(
+                    "Не удалось получить публикацию X / Twitter. "
+                    "Для закрытых или ограниченных публикаций загрузите cookies."
+                ) from syndication_error
+            try:
+                return self._twitter_authenticated_post_info(url, user_id)
+            except Exception as authenticated_error:
+                raise ValueError(
+                    "Не удалось получить публикацию X / Twitter даже с cookies"
+                ) from authenticated_error
+
+    @staticmethod
+    def _video_from_source_post(post: MediaSourcePost) -> Video:
+        return Video(
+            video_id=post.post_id,
+            username=post.username,
+            description=post.description,
+            url=post.webpage_url,
+            timestamp=post.timestamp,
+            platform=post.platform,
+            author_url=post.author_url,
+            media_type=post.media_type,
+        )
+
+    def _cleanup_output_files(self, output_id: str) -> None:
+        for pattern in (f"{output_id}.*", f"{output_id}-*"):
+            for partial_file in self.download_dir.glob(pattern):
+                if partial_file.is_file():
+                    partial_file.unlink(missing_ok=True)
+
+    def _download_video_files(
+        self,
+        url: str,
+        platform: str,
+        output_id: str,
+        user_id: int,
+    ) -> tuple[dict[str, Any], tuple[Path, ...]]:
+        output_template = str(
+            self.download_dir / f"{output_id}-%(autonumber)02d.%(ext)s"
+        )
+        options = {
+            **self._ydl_options(self._cookie_file(platform, user_id)),
+            "format": "best[ext=mp4][filesize<49M]/best[filesize<49M]/best[ext=mp4]/best",
+            "merge_output_format": "mp4",
+            "outtmpl": output_template,
+            "max_filesize": MAX_VIDEO_BYTES,
+        }
+        try:
+            with self.ydl_lock, yt_dlp.YoutubeDL(options) as ydl:
+                info = ydl.extract_info(url, download=True)
+            paths = tuple(
+                sorted(
+                    (
+                        path
+                        for path in self.download_dir.glob(f"{output_id}-*")
+                        if path.is_file()
+                        and path.suffix not in {".part", ".ytdl"}
+                        and not re.search(r"\.f\d+\.[^.]+$", path.name)
+                    ),
+                    key=lambda path: path.name,
+                )
+            )
+            if not paths:
+                raise FileNotFoundError("Скачанные видео не найдены")
+            oversized = [path for path in paths if path.stat().st_size > MAX_VIDEO_BYTES]
+            if oversized:
+                raise ValueError("Видео больше лимита Telegram Bot API в 50 МБ")
+            return info, paths
+        except Exception:
+            self._cleanup_output_files(output_id)
+            raise
+
     def _download_video_file(
         self, url: str, platform: str, output_id: str, user_id: int
     ) -> tuple[dict[str, Any], Path]:
@@ -1828,6 +2147,59 @@ class TikTokToTelegram:
         media_type = "video"
         paths: tuple[Path, ...]
 
+        if platform in {"twitter", "reddit"}:
+            try:
+                source_post = self._social_post_info(url, platform, user_id)
+            except Exception as metadata_error:
+                LOGGER.info(
+                    "Could not inspect %s post %s; trying video extraction: %s",
+                    platform,
+                    url,
+                    metadata_error,
+                )
+                try:
+                    info, paths = self._download_video_files(
+                        url, platform, output_id, user_id
+                    )
+                except Exception:
+                    raise metadata_error
+                webpage_url = str(info.get("webpage_url") or url)
+                username, author_url = media_author_from_info(
+                    info, webpage_url, platform
+                )
+                return Video(
+                    video_id=str(
+                        info.get("id")
+                        or (
+                            twitter_post_id_from_url(webpage_url)
+                            if platform == "twitter"
+                            else reddit_post_id_from_url(webpage_url)
+                        )
+                        or output_id
+                    ),
+                    username=username,
+                    description=str(info.get("description") or info.get("title") or ""),
+                    url=webpage_url,
+                    timestamp=int(info.get("timestamp") or 0),
+                    platform=platform,
+                    author_url=author_url,
+                    media_type="video",
+                ), paths
+
+            video = self._video_from_source_post(source_post)
+            if source_post.media_type == "image":
+                paths = self._download_images(
+                    list(source_post.image_urls),
+                    output_id,
+                    self._cookie_file(platform, user_id),
+                )
+            elif source_post.media_type == "video":
+                _, paths = self._download_video_files(
+                    url, platform, output_id, user_id
+                )
+            else:
+                paths = ()
+            return video, paths
         if platform == "tiktok" and is_tiktok_photo_url(url):
             image_urls = self._tiktok_image_post_urls(url, self._cookie_file(platform, user_id))
             if not image_urls:
@@ -1943,15 +2315,14 @@ class TikTokToTelegram:
         return paths
 
     def prepare_url(self, url: str, user_id: int = 1) -> tuple[Video, tuple[Path, ...]]:
-        platform = "instagram" if is_instagram_url(url) else "tiktok"
+        platform = detect_media_platform(url)
         self.ensure_service_allowed(platform, user_id)
-        url = validate_instagram_url(url) if platform == "instagram" else validate_tiktok_url(url)
+        url = MEDIA_SOURCE_REGISTRY[platform].validator(url)
         output_id = f"manual-{uuid.uuid4().hex}"
         try:
             return self._prepare_media(url, platform, output_id, user_id)
         except Exception:
-            for partial_file in self.download_dir.glob(f"{output_id}.*"):
-                partial_file.unlink()
+            self._cleanup_output_files(output_id)
             raise
 
     def search_spotify(self, query: str, user_id: int = 1) -> SpotifyTrack:
@@ -2400,7 +2771,7 @@ class TikTokToTelegram:
                     video.url, video.platform, video.video_id, user_id
                 )
                 self.publish(prepared_video, paths, chat_id=destination, user_id=user_id)
-                self.storage.mark(video.video_id, username, user_id)
+                self.mark_processed(prepared_video, user_id)
                 published += 1
             finally:
                 for path in paths:
@@ -2424,6 +2795,9 @@ class TikTokToTelegram:
     ) -> None:
         self.ensure_service_allowed(video.platform, user_id)
         target = self.storage.telegram_destination(chat_id, user_id)
+        max_length = (
+            MAX_MESSAGE_LENGTH if video.media_type == "text" else MAX_CAPTION_LENGTH
+        )
         fallback_caption = build_caption(
             video,
             quote_text,
@@ -2431,8 +2805,13 @@ class TikTokToTelegram:
             after_text,
             include_author,
             include_description,
+            max_length=max_length,
         )
-        caption = resolve_caption_html(caption_html, fallback_caption)
+        caption = resolve_caption_html(
+            caption_html,
+            fallback_caption,
+            max_length=max_length,
+        )
         self._publish_media_to_telegram(
             video,
             path,
@@ -2451,96 +2830,120 @@ class TikTokToTelegram:
         message_thread_id: int | None = None,
     ) -> None:
         paths = (path,) if isinstance(path, Path) else path
+        if video.media_type == "text":
+            if not caption:
+                raise ValueError("Текст публикации пуст")
+            text_data: dict[str, Any] = {
+                "chat_id": chat_id,
+                "text": caption,
+                "parse_mode": "HTML",
+            }
+            if message_thread_id:
+                text_data["message_thread_id"] = message_thread_id
+            response = requests.post(
+                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                data=text_data,
+                timeout=60,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not payload.get("ok"):
+                raise RuntimeError(f"Telegram API error: {payload}")
+            return
         if not paths:
             raise ValueError("Медиафайлы не найдены")
 
-        if video.media_type == "image":
-            if len(paths) == 1:
-                url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
-                photo_data: dict[str, Any] = {
-                    "chat_id": chat_id,
-                    "caption": caption,
-                    "parse_mode": "HTML",
-                }
-                if message_thread_id:
-                    photo_data["message_thread_id"] = message_thread_id
-                with paths[0].open("rb") as photo_file:
-                    response = requests.post(
-                        url,
-                        data=photo_data,
-                        files={"photo": (paths[0].name, photo_file, "image/jpeg")},
-                        timeout=180,
-                    )
-                response.raise_for_status()
-                payload = response.json()
-                if not payload.get("ok"):
-                    raise RuntimeError(f"Telegram API error: {payload}")
-                return
+        media_kind = "photo" if video.media_type == "image" else "video"
 
-            url = f"https://api.telegram.org/bot{bot_token}/sendMediaGroup"
-            first_chunk = True
-            for chunk_start in range(0, len(paths), 10):
-                chunk = paths[chunk_start : chunk_start + 10]
-                files = {}
-                open_files = []
-                media = []
-                try:
-                    for index, image_path in enumerate(chunk):
-                        field_name = f"photo{index}"
-                        file_handle = image_path.open("rb")
-                        open_files.append(file_handle)
-                        files[field_name] = (image_path.name, file_handle, "image/jpeg")
-                        item: dict[str, str] = {
-                            "type": "photo",
-                            "media": f"attach://{field_name}",
-                        }
-                        if first_chunk and index == 0:
-                            item["caption"] = caption
-                            item["parse_mode"] = "HTML"
-                        media.append(item)
-                    media_data: dict[str, Any] = {
-                        "chat_id": chat_id,
-                        "media": json.dumps(media),
-                    }
-                    if message_thread_id:
-                        media_data["message_thread_id"] = message_thread_id
-                    response = requests.post(
-                        url,
-                        data=media_data,
-                        files=files,
-                        timeout=180,
-                    )
-                finally:
-                    for file_handle in open_files:
-                        file_handle.close()
-                response.raise_for_status()
-                payload = response.json()
-                if not payload.get("ok"):
-                    raise RuntimeError(f"Telegram API error: {payload}")
-                first_chunk = False
+        def check_response(response: requests.Response) -> None:
+            response.raise_for_status()
+            payload = response.json()
+            if not payload.get("ok"):
+                raise RuntimeError(f"Telegram API error: {payload}")
+
+        def send_single(media_path: Path, item_caption: str) -> None:
+            method = "sendPhoto" if media_kind == "photo" else "sendVideo"
+            data: dict[str, Any] = {
+                "chat_id": chat_id,
+                "caption": item_caption,
+                "parse_mode": "HTML",
+            }
+            if media_kind == "video":
+                data["supports_streaming"] = "true"
+            if message_thread_id:
+                data["message_thread_id"] = message_thread_id
+            content_type = mimetypes.guess_type(media_path.name)[0] or (
+                "image/jpeg" if media_kind == "photo" else "video/mp4"
+            )
+            with media_path.open("rb") as media_file:
+                response = requests.post(
+                    f"https://api.telegram.org/bot{bot_token}/{method}",
+                    data=data,
+                    files={
+                        media_kind: (
+                            media_path.name,
+                            media_file,
+                            content_type,
+                        )
+                    },
+                    timeout=180,
+                )
+            check_response(response)
+
+        if len(paths) == 1:
+            send_single(paths[0], caption)
             return
 
-        video_path = paths[0]
-        url = f"https://api.telegram.org/bot{bot_token}/sendVideo"
-        video_data: dict[str, Any] = {
-            "chat_id": chat_id,
-            "caption": caption,
-            "parse_mode": "HTML",
-            "supports_streaming": "true",
-        }
-        if message_thread_id:
-            video_data["message_thread_id"] = message_thread_id
-        with video_path.open("rb") as video_file:
-            response = requests.post(
-                url,
-                data=video_data,
-                files={"video": (video_path.name, video_file, "video/mp4")},
-                timeout=180,
-            )
-        response.raise_for_status()
-        payload = response.json()
-        if not payload.get("ok"):
-            raise RuntimeError(f"Telegram API error: {payload}")
+        first_chunk = True
+        for chunk_start in range(0, len(paths), 10):
+            chunk = paths[chunk_start : chunk_start + 10]
+            if len(chunk) == 1:
+                send_single(chunk[0], caption if first_chunk else "")
+                first_chunk = False
+                continue
+            files: dict[str, tuple[str, Any, str]] = {}
+            open_files = []
+            media: list[dict[str, Any]] = []
+            try:
+                for index, media_path in enumerate(chunk):
+                    field_name = f"{media_kind}{index}"
+                    file_handle = media_path.open("rb")
+                    open_files.append(file_handle)
+                    content_type = mimetypes.guess_type(media_path.name)[0] or (
+                        "image/jpeg" if media_kind == "photo" else "video/mp4"
+                    )
+                    files[field_name] = (
+                        media_path.name,
+                        file_handle,
+                        content_type,
+                    )
+                    item: dict[str, Any] = {
+                        "type": media_kind,
+                        "media": f"attach://{field_name}",
+                    }
+                    if media_kind == "video":
+                        item["supports_streaming"] = True
+                    if first_chunk and index == 0:
+                        item["caption"] = caption
+                        item["parse_mode"] = "HTML"
+                    media.append(item)
+                media_data: dict[str, Any] = {
+                    "chat_id": chat_id,
+                    "media": json.dumps(media),
+                }
+                if message_thread_id:
+                    media_data["message_thread_id"] = message_thread_id
+                response = requests.post(
+                    f"https://api.telegram.org/bot{bot_token}/sendMediaGroup",
+                    data=media_data,
+                    files=files,
+                    timeout=180,
+                )
+            finally:
+                for file_handle in open_files:
+                    file_handle.close()
+            check_response(response)
+            first_chunk = False
 
     def publish_youtube(
         self,
@@ -2685,7 +3088,7 @@ class TikTokToTelegram:
 
         if not self.config.post_existing and not self.storage.is_channel_initialized(username, user_id):
             for video in videos:
-                self.storage.mark(video.video_id, username, user_id)
+                self.mark_processed(video, user_id)
             self.storage.mark_channel_initialized(username, user_id)
             LOGGER.info("Initial videos for @%s marked as processed", username)
             return
@@ -2700,7 +3103,7 @@ class TikTokToTelegram:
                     video.url, video.platform, video.video_id, user_id
                 )
                 self.publish(prepared_video, paths, user_id=user_id)
-                self.storage.mark(video.video_id, username, user_id)
+                self.mark_processed(prepared_video, user_id)
                 LOGGER.info("Published %s", video.url)
             finally:
                 for path in paths:

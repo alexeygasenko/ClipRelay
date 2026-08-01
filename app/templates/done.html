@@ -1,9 +1,0 @@
-{% extends "base.html" %}
-{% block title %}Опубликовано{% endblock %}
-{% block heading %}Пост опубликован{% endblock %}
-{% block lead %}{% if source == "youtube" %}Telegram принял ссылку, превью и текст публикации.{% elif source == "spotify" %}Telegram принял MP3-трек и подпись.{% else %}Telegram принял видео и подпись.{% endif %}{% endblock %}
-{% block content %}
-<div class="card done">
-  <a class="button" href="{{ url_for('index') }}" data-animated-nav>Подготовить следующий пост</a>
-</div>
-{% endblock %}

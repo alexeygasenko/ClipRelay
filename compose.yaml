@@ -16,6 +16,10 @@ services:
       # Нужен только при spotify.cookies_file: spotify-cookies.txt.
       # Проще загрузить этот файл через настройки веб-интерфейса.
       # - ./spotify-cookies.txt:/config/spotify-cookies.txt:ro
+      # Необязательные cookies для ограниченных публикаций X / Twitter и Reddit.
+      # Их также можно загрузить через настройки веб-интерфейса.
+      # - ./twitter-cookies.txt:/config/twitter-cookies.txt:ro
+      # - ./reddit-cookies.txt:/config/reddit-cookies.txt:ro
 
   bgutil-provider:
     image: brainicism/bgutil-ytdlp-pot-provider:1.3.1

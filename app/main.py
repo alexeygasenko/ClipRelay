@@ -1,10 +1,11 @@
 import logging
 import threading
 
+import uvicorn
+
 from app.config import Config
 from app.service import TikTokToTelegram
 from app.web import create_app
-from waitress import serve
 
 
 def main() -> None:
@@ -20,7 +21,12 @@ def main() -> None:
         daemon=True,
         name="telegram-commands",
     ).start()
-    serve(create_app(config, service), host=config.web_host, port=config.web_port, threads=4)
+    uvicorn.run(
+        create_app(config, service),
+        host=config.web_host,
+        port=config.web_port,
+        server_header=False,
+    )
 
 
 if __name__ == "__main__":

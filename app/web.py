@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import hmac
+import json
 import logging
 import math
 import mimetypes
@@ -8,30 +11,65 @@ import re
 import secrets
 import threading
 import time
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
+from urllib.parse import urlencode
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import requests
-from flask import Flask, Response, abort, g, jsonify, redirect, render_template, request, send_file, session, url_for
-from werkzeug.security import check_password_hash, generate_password_hash
-from werkzeug.utils import secure_filename
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    Response,
+)
+from fastapi.staticfiles import StaticFiles
+from starlette.datastructures import FormData, UploadFile
+from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import Config, TelegramChannel
+from app.media_sources import detect_media_platform
+from app.security import safe_redirect_target, verify_bootstrap_credentials
 from app.service import (
     SpotifyTrack,
     TikTokToTelegram,
     Video,
     YouTubeVideo,
-    is_instagram_url,
     is_tiktok_video_url,
 )
 from app.storage import User
+from app.web_passwords import check_password_hash, generate_password_hash
+from app.web_payloads import (
+    SERVICE_META,
+    channel_payload,
+    spotify_payload,
+    user_payload,
+    video_payload,
+    youtube_payload,
+)
 
 LOGGER = logging.getLogger(__name__)
 JOB_TTL_SECONDS = 6 * 60 * 60
+MAX_REQUEST_BYTES = 6 * 1024 * 1024
+STATIC_DIRECTORY = Path(__file__).parent / "static"
+SPA_DIRECTORY = STATIC_DIRECTORY / "frontend"
+
+
+def _not_found() -> HTTPException:
+    return HTTPException(status_code=404, detail="Not found")
+
+
+def _secure_filename(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value or "")
+    ascii_value = normalized.encode("ascii", "ignore").decode("ascii")
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", ascii_value).strip("._")
+    return safe[:180]
 
 
 @dataclass
@@ -45,6 +83,8 @@ class PreparedJob:
 
     @property
     def path(self) -> Path:
+        if not self.paths:
+            raise _not_found()
         return self.paths[0]
 
 
@@ -63,11 +103,20 @@ class JobStore:
         self.lock = threading.Lock()
 
     def add(
-        self, video: Video, path: Path | tuple[Path, ...], selected_chat_id: str, user_id: int = 1
+        self,
+        video: Video,
+        path: Path | tuple[Path, ...],
+        selected_chat_id: str,
+        user_id: int = 1,
     ) -> PreparedJob:
-        paths = (path,) if isinstance(path, Path) else path
+        paths = (path,) if isinstance(path, Path) else tuple(path)
         job = PreparedJob(
-            uuid.uuid4().hex, video, paths, time.time(), selected_chat_id, user_id
+            uuid.uuid4().hex,
+            video,
+            paths,
+            time.time(),
+            selected_chat_id,
+            user_id,
         )
         with self.lock:
             self._cleanup()
@@ -79,7 +128,7 @@ class JobStore:
             self._cleanup()
             job = self.jobs.get(job_id)
         if not job:
-            abort(404)
+            raise _not_found()
         return job
 
     def remove(self, job_id: str) -> None:
@@ -87,8 +136,7 @@ class JobStore:
             job = self.jobs.pop(job_id, None)
         if job:
             for path in job.paths:
-                if path.exists():
-                    path.unlink()
+                path.unlink(missing_ok=True)
 
     def _cleanup(self) -> None:
         expired = [
@@ -99,8 +147,7 @@ class JobStore:
         for job_id in expired:
             job = self.jobs.pop(job_id)
             for path in job.paths:
-                if path.exists():
-                    path.unlink()
+                path.unlink(missing_ok=True)
 
 
 class YouTubeJobStore:
@@ -120,7 +167,7 @@ class YouTubeJobStore:
             self._cleanup()
             job = self.jobs.get(job_id)
         if not job:
-            abort(404)
+            raise _not_found()
         return job
 
     def set_path(self, job_id: str, path: Path) -> None:
@@ -130,8 +177,8 @@ class YouTubeJobStore:
     def remove(self, job_id: str) -> None:
         with self.lock:
             job = self.jobs.pop(job_id, None)
-        if job and job.path and job.path.exists():
-            job.path.unlink()
+        if job and job.path:
+            job.path.unlink(missing_ok=True)
 
     def _cleanup(self) -> None:
         expired = [
@@ -141,13 +188,18 @@ class YouTubeJobStore:
         ]
         for job_id in expired:
             job = self.jobs.pop(job_id)
-            if job.path and job.path.exists():
-                job.path.unlink()
+            if job.path:
+                job.path.unlink(missing_ok=True)
 
 
-def create_app(config: Config, service: TikTokToTelegram) -> Flask:
-    app = Flask(__name__)
-    app.config["MAX_CONTENT_LENGTH"] = 6 * 1024 * 1024
+def create_app(config: Config, service: TikTokToTelegram) -> FastAPI:
+    """Build the FastAPI web application consumed by the Vue SPA."""
+    app = FastAPI(
+        title="ClipRelay",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
     auth_storage = getattr(service, "storage", None)
     auth_supported = all(
         hasattr(auth_storage, name)
@@ -158,76 +210,166 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
         if not secret:
             secret = secrets.token_hex(32)
             auth_storage.set_setting("session_secret", secret, user_id=1)
-        app.secret_key = secret
     else:
-        app.secret_key = config.web_password or secrets.token_hex(32)
+        secret = config.web_password or secrets.token_hex(32)
+
     jobs = JobStore()
     youtube_jobs = YouTubeJobStore()
     fallback_telegram_channels = config.telegram_channels or (
         TelegramChannel(config.telegram_chat_id, config.telegram_chat_id),
     )
 
-    def current_user() -> User | None:
+    def route_path(name: str, **params: object) -> str:
+        return str(app.url_path_for(name, **{key: str(value) for key, value in params.items()}))
+
+    def with_query(path: str, **params: object) -> str:
+        values = {
+            key: str(value)
+            for key, value in params.items()
+            if value is not None and str(value) != ""
+        }
+        return f"{path}?{urlencode(values)}" if values else path
+
+    def render_spa() -> Response:
+        index_file = SPA_DIRECTORY / "index.html"
+        if not index_file.is_file():
+            return PlainTextResponse(
+                "Vue frontend is not built. Run `npm install && npm run build` in frontend/.",
+                status_code=503,
+            )
+        return FileResponse(
+            index_file,
+            media_type="text/html",
+            headers={"Cache-Control": "no-cache"},
+        )
+
+    def wants_json(request: Request) -> bool:
+        content_type = request.headers.get("content-type", "").lower()
+        accept = request.headers.get("accept", "").lower()
+        return (
+            request.headers.get("X-Requested-With") == "fetch"
+            or content_type.startswith("application/json")
+            or ("application/json" in accept and "text/html" not in accept)
+        )
+
+    def payload(request: Request) -> dict | FormData:
+        return getattr(request.state, "payload", {})
+
+    def request_value(request: Request, name: str, default: str = "") -> str:
+        value = payload(request).get(name, default)
+        if value is None or isinstance(value, UploadFile):
+            return default
+        return str(value)
+
+    def request_optional_value(request: Request, name: str) -> str | None:
+        values = payload(request)
+        if name not in values or values.get(name) is None:
+            return None
+        value = values.get(name)
+        return None if isinstance(value, UploadFile) else str(value)
+
+    def request_bool(request: Request, name: str) -> bool:
+        value = payload(request).get(name, False)
+        return value if isinstance(value, bool) else str(value).lower() in {
+            "1",
+            "true",
+            "on",
+            "yes",
+        }
+
+    def request_list(request: Request, name: str) -> list[str]:
+        values = payload(request)
+        if isinstance(values, FormData):
+            raw_values = values.getlist(name)
+        else:
+            raw = values.get(name, [])
+            raw_values = raw if isinstance(raw, list) else [raw]
+        return [str(item) for item in raw_values if not isinstance(item, UploadFile)]
+
+    def json_error(error: Exception | str, status: int = 400) -> JSONResponse:
+        return JSONResponse({"ok": False, "error": str(error)}, status_code=status)
+
+    def success_response(
+        *,
+        redirect_to: str | None = None,
+        status: int = 200,
+        **response_payload: object,
+    ) -> JSONResponse:
+        body: dict[str, object] = {"ok": True, **response_payload}
+        if redirect_to:
+            body["redirect"] = redirect_to
+        return JSONResponse(body, status_code=status)
+
+    def current_user(request: Request) -> User | None:
         if not auth_supported:
             return None
-        user_id = session.get("user_id")
+        user_id = request.session.get("user_id")
         if not user_id:
             return None
         return auth_storage.get_user(int(user_id))
 
-    def login_user(user: User) -> None:
-        session.clear()
-        session["user_id"] = user.id
+    def login_user(request: Request, user: User) -> None:
+        request.session.clear()
+        request.session["user_id"] = user.id
 
-    def active_user_id() -> int:
-        user = getattr(g, "current_user", None)
+    def active_user_id(request: Request) -> int:
+        user = getattr(request.state, "current_user", None)
         return user.id if user else 1
 
-    def settings_user_id() -> int:
-        requested = request.values.get("settings_user_id")
-        user = getattr(g, "current_user", None)
+    def settings_user_id(request: Request) -> int:
+        requested = request_value(request, "settings_user_id")
+        user = getattr(request.state, "current_user", None)
         if requested and user and user.is_admin:
-            return int(requested)
-        return active_user_id()
+            try:
+                return int(requested)
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Некорректный ID пользователя",
+                ) from None
+        return active_user_id(request)
 
-    def service_permissions(user_id: int | None = None) -> dict[str, bool]:
+    def service_permissions(
+        request: Request,
+        user_id: int | None = None,
+    ) -> dict[str, bool]:
         if not auth_supported:
-            return {
-                "tiktok": True,
-                "instagram": True,
-                "youtube": True,
-                "spotify": True,
-            }
-        user = auth_storage.get_user(user_id or active_user_id())
+            return {name: True for name in SERVICE_META}
+        user = auth_storage.get_user(user_id or active_user_id(request))
         if not user or user.is_disabled:
-            return {
-                "tiktok": False,
-                "instagram": False,
-                "youtube": False,
-                "spotify": False,
-            }
+            return {name: False for name in SERVICE_META}
         return {
-            "tiktok": user.allow_tiktok,
-            "instagram": user.allow_instagram,
-            "youtube": user.allow_youtube,
-            "spotify": user.allow_spotify,
+            name: bool(getattr(user, f"allow_{name}", False))
+            for name in SERVICE_META
         }
 
-    def require_service(service_name: str, user_id: int | None = None) -> None:
-        if not service_permissions(user_id).get(service_name, False):
+    def require_service(
+        request: Request,
+        service_name: str,
+        user_id: int | None = None,
+    ) -> None:
+        if not service_permissions(request, user_id).get(service_name, False):
             raise PermissionError(f"Сервис {service_name} отключён для пользователя")
 
     def with_user_arg(args: tuple, user_id: int) -> tuple:
         return (*args, user_id) if auth_supported else args
 
-    def telegram_channels(user_id: int | None = None) -> tuple[TelegramChannel, ...]:
+    def telegram_channels(
+        request: Request,
+        user_id: int | None = None,
+    ) -> tuple[TelegramChannel, ...]:
         if hasattr(service, "telegram_channels"):
-            args = with_user_arg((), user_id or active_user_id())
-            return service.telegram_channels(*args)
+            return service.telegram_channels(
+                *with_user_arg((), user_id or active_user_id(request))
+            )
         return fallback_telegram_channels
 
-    def validate_chat_id(chat_id: str | None, user_id: int | None = None) -> str:
-        channels = telegram_channels(user_id)
+    def validate_chat_id(
+        request: Request,
+        chat_id: str | None,
+        user_id: int | None = None,
+    ) -> str:
+        channels = telegram_channels(request, user_id)
         if not channels:
             raise ValueError("Сначала добавьте Telegram-канал в настройках")
         selected = (chat_id or channels[0].chat_id).strip()
@@ -235,624 +377,1075 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
             raise ValueError("Выбран неизвестный Telegram-канал")
         return selected
 
-    def monitored_tiktok_channels(user_id: int | None = None) -> tuple[str, ...]:
+    def monitored_tiktok_channels(
+        request: Request,
+        user_id: int | None = None,
+    ) -> tuple[str, ...]:
         if hasattr(service, "monitored_tiktok_channels"):
-            args = with_user_arg((), user_id or active_user_id())
-            return service.monitored_tiktok_channels(*args)
+            return service.monitored_tiktok_channels(
+                *with_user_arg((), user_id or active_user_id(request))
+            )
         return config.tiktok_channels
 
-    def poll_interval_seconds(user_id: int | None = None) -> int:
+    def poll_interval_seconds(request: Request, user_id: int | None = None) -> int:
         if hasattr(service, "poll_interval_seconds"):
-            args = with_user_arg((), user_id or active_user_id())
-            return service.poll_interval_seconds(*args)
+            return service.poll_interval_seconds(
+                *with_user_arg((), user_id or active_user_id(request))
+            )
         return config.poll_interval_seconds
 
-    def index_context(**extra):
-        user_id = int(extra.pop("settings_user_id", active_user_id()))
-        settings_user = auth_storage.get_user(user_id) if auth_supported else None
+    def cookie_status(service_name: str, user_id: int) -> dict[str, object]:
+        if hasattr(service, "cookie_status"):
+            return service.cookie_status(
+                *with_user_arg((service_name,), user_id)
+            )
         return {
-            "telegram_channels": telegram_channels(user_id),
-            "monitored_tiktok_channels": monitored_tiktok_channels(user_id),
-            "poll_interval_seconds": poll_interval_seconds(user_id),
-            "service_permissions": service_permissions(user_id),
-            "settings_user": settings_user,
-            "admin_settings_mode": bool(
-                settings_user and settings_user.id != active_user_id()
-            ),
-            **extra,
+            "uploaded": False,
+            "valid": False,
+            "reason": "missing",
+            "cookie_count": 0,
         }
 
-    @app.before_request
-    def require_auth() -> Response | None:
-        if auth_supported:
-            if request.endpoint in {
-                "login",
-                "login_post",
-                "logout",
-                "register",
-                "setup_admin_password",
-                "static",
-            }:
-                return None
-            user = current_user()
-            if not user or user.is_disabled:
-                session.clear()
-                return redirect(url_for("login", next=request.full_path))
-            g.current_user = user
-            if user.must_set_password or not user.password_hash:
-                return redirect(url_for("setup_admin_password"))
-            return None
-        if not config.web_username or not config.web_password:
-            return None
-        auth = request.authorization
-        valid = (
-            auth is not None
-            and hmac.compare_digest(auth.username or "", config.web_username)
-            and hmac.compare_digest(auth.password or "", config.web_password)
+    def bootstrap_payload(request: Request) -> dict:
+        user = current_user(request)
+        if user and user.is_disabled:
+            request.session.clear()
+            user = None
+        admin = auth_storage.get_user(1) if auth_supported else None
+        setup_required = bool(
+            admin and (admin.must_set_password or not admin.password_hash)
         )
-        if valid:
-            return None
-        return Response(
-            "Требуется авторизация",
-            401,
-            {"WWW-Authenticate": 'Basic realm="TikTok to Telegram"'},
-        )
+        user_id = user.id if user else 1
+        return {
+            "auth_supported": auth_supported,
+            "authenticated": not auth_supported or bool(user),
+            "setup_required": setup_required,
+            "setup_credentials_required": setup_required,
+            "user": user_payload(user),
+            "permissions": (
+                service_permissions(request, user_id)
+                if not auth_supported or user
+                else {name: False for name in SERVICE_META}
+            ),
+            "telegram_channels": (
+                [
+                    channel_payload(channel)
+                    for channel in telegram_channels(request, user_id)
+                ]
+                if not auth_supported or user
+                else []
+            ),
+            "services": [
+                {"id": name, **metadata}
+                for name, metadata in SERVICE_META.items()
+            ],
+        }
 
-    @app.get("/login")
-    def login():
-        if not auth_supported:
-            return redirect(url_for("index"))
-        admin = auth_storage.get_user(1)
-        if admin and (admin.must_set_password or not admin.password_hash):
-            return redirect(url_for("setup_admin_password"))
-        return render_template("login.html", next=request.args.get("next", ""))
+    def settings_payload(request: Request, user_id: int) -> dict:
+        settings_user = auth_storage.get_user(user_id) if auth_supported else None
+        permissions = service_permissions(request, user_id)
+        return {
+            "settings_user": user_payload(settings_user),
+            "admin_mode": bool(
+                settings_user and settings_user.id != active_user_id(request)
+            ),
+            "permissions": permissions,
+            "telegram_channels": [
+                channel_payload(channel)
+                for channel in telegram_channels(request, user_id)
+            ],
+            "monitored_tiktok_channels": list(
+                monitored_tiktok_channels(request, user_id)
+            ),
+            "poll_interval_seconds": poll_interval_seconds(request, user_id),
+            "cookie_services": [
+                {
+                    "id": name,
+                    "name": SERVICE_META[name]["label"],
+                    **SERVICE_META[name],
+                    "cookies": cookie_status(name, user_id),
+                }
+                for name in SERVICE_META
+                if permissions.get(name, False)
+            ],
+        }
 
-    @app.post("/login")
-    def login_post():
-        if not auth_supported:
-            return redirect(url_for("index"))
-        username = request.form.get("username", "").strip()
-        password = request.form.get("password", "")
-        user = auth_storage.get_user_by_username(username)
-        if not user or user.is_disabled or not user.password_hash:
-            return render_template("login.html", error="Неверный логин или пароль"), 401
-        if not check_password_hash(user.password_hash, password):
-            return render_template("login.html", error="Неверный логин или пароль"), 401
-        login_user(user)
-        if user.must_set_password:
-            return redirect(url_for("setup_admin_password"))
-        return redirect(request.form.get("next") or url_for("index"))
+    def settings_result(
+        request: Request,
+        user_id: int,
+        event: str,
+        **extra: object,
+    ) -> Response:
+        if wants_json(request):
+            return success_response(
+                event=event,
+                settings=settings_payload(request, user_id),
+                channels=[
+                    {"chat_id": channel.chat_id}
+                    for channel in telegram_channels(request, user_id)
+                ],
+                **extra,
+            )
+        if user_id != active_user_id(request):
+            destination = with_query(
+                route_path("settings"),
+                user_id=user_id,
+                settings=event,
+                **extra,
+            )
+        else:
+            destination = with_query(route_path("settings"), settings=event, **extra)
+        return RedirectResponse(destination, status_code=302)
 
-    @app.route("/setup-admin", methods=["GET", "POST"])
-    def setup_admin_password():
-        if not auth_supported:
-            return redirect(url_for("index"))
-        admin = auth_storage.get_user(1)
-        if not admin:
-            abort(404)
-        logged_user = current_user()
-        if admin.password_hash and not (logged_user and logged_user.id == admin.id):
-            return redirect(url_for("login"))
-        if request.method == "POST":
-            password = request.form.get("password", "")
-            confirm = request.form.get("confirm_password", "")
-            if len(password) < 8:
-                return render_template(
-                    "setup_admin.html", error="Пароль должен быть не короче 8 символов"
-                ), 400
-            if password != confirm:
-                return render_template(
-                    "setup_admin.html", error="Пароли не совпадают"
-                ), 400
-            auth_storage.set_user_password(admin.id, generate_password_hash(password))
-            admin = auth_storage.get_user(admin.id)
-            assert admin is not None
-            login_user(admin)
-            return redirect(url_for("index"))
-        return render_template("setup_admin.html")
+    def settings_failure(
+        request: Request,
+        error: Exception,
+        status: int = 400,
+    ) -> Response:
+        if wants_json(request):
+            return json_error(error, status)
+        return PlainTextResponse(str(error), status_code=status)
 
-    @app.route("/register", methods=["GET", "POST"])
-    def register():
-        if not auth_supported:
-            return redirect(url_for("index"))
-        if request.method == "POST":
-            username = request.form.get("username", "").strip()
-            password = request.form.get("password", "")
-            confirm = request.form.get("confirm_password", "")
-            if not re.fullmatch(r"[A-Za-z0-9_.-]{3,32}", username):
-                return render_template(
-                    "register.html",
-                    error="Логин: 3-32 символа, латиница, цифры, точка, дефис или подчёркивание",
-                ), 400
-            if len(password) < 8:
-                return render_template(
-                    "register.html", error="Пароль должен быть не короче 8 символов"
-                ), 400
-            if password != confirm:
-                return render_template("register.html", error="Пароли не совпадают"), 400
-            try:
-                user = auth_storage.create_user(username, generate_password_hash(password))
-            except Exception:
-                return render_template("register.html", error="Логин уже занят"), 400
-            login_user(user)
-            return redirect(url_for("index"))
-        return render_template("register.html")
+    def prepared_job_payload(
+        request: Request,
+        job: PreparedJob,
+        selected_chat_id: str | None = None,
+    ) -> dict:
+        all_previews = [
+            route_path(
+                "preview_item",
+                job_id=job.job_id,
+                item_index=index,
+            )
+            for index in range(len(job.paths))
+        ]
+        post = video_payload(job.video)
+        destination = selected_chat_id or job.selected_chat_id
+        return {
+            "job_id": job.job_id,
+            "post": post,
+            "media": post,
+            "media_type": job.video.media_type,
+            "preview_url": all_previews[0] if all_previews else None,
+            "preview_urls": (
+                all_previews if job.video.media_type == "image" else []
+            ),
+            # Text posts are downloaded as a UTF-8 .txt attachment by this route.
+            "download_url": route_path("media_video", job_id=job.job_id),
+            "post_url": with_query(
+                route_path("media_post", job_id=job.job_id),
+                chat_id=destination,
+            ),
+            "send_url": route_path("send", job_id=job.job_id),
+            "cancel_url": route_path("cancel", job_id=job.job_id),
+            "selected_chat_id": destination,
+            "telegram_channels": [
+                channel_payload(channel)
+                for channel in telegram_channels(request, job.user_id)
+            ],
+        }
 
-    @app.post("/logout")
-    def logout():
-        session.clear()
-        return redirect(url_for("login"))
+    def youtube_job_payload(request: Request, job: YouTubeJob) -> dict:
+        return {
+            "job_id": job.job_id,
+            "video": {
+                **youtube_payload(job.video),
+                "duration": int(job.video.duration or 0),
+            },
+            "thumbnail_download_url": route_path(
+                "youtube_thumbnail", job_id=job.job_id
+            ),
+            "video_download_url": route_path(
+                "youtube_video", job_id=job.job_id
+            ),
+            "post_url": route_path("youtube_post", job_id=job.job_id),
+            "send_url": route_path("youtube_send", job_id=job.job_id),
+            "telegram_channels": [
+                channel_payload(channel)
+                for channel in telegram_channels(request, job.user_id)
+            ],
+        }
 
-    def require_admin() -> User:
-        user = getattr(g, "current_user", None)
+    def require_admin(request: Request) -> User:
+        user = getattr(request.state, "current_user", None)
         if not user or not user.is_admin:
-            abort(403)
+            raise HTTPException(status_code=403, detail="Forbidden")
         return user
 
-    @app.get("/admin/users")
-    def admin_users():
-        require_admin()
-        page = max(1, int(request.args.get("page", "1") or "1"))
+    @app.middleware("http")
+    async def request_context(request: Request, call_next):
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > MAX_REQUEST_BYTES:
+                    return json_error("Размер запроса превышает 6 МБ", 413)
+            except ValueError:
+                return json_error("Некорректный Content-Length", 400)
+
+        request.state.payload = {}
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            content_type = request.headers.get("content-type", "").lower()
+            try:
+                if content_type.startswith("application/json"):
+                    body = await request.body()
+                    request.state.payload = json.loads(body) if body else {}
+                    if not isinstance(request.state.payload, dict):
+                        return json_error("JSON-запрос должен быть объектом", 400)
+                elif (
+                    content_type.startswith("application/x-www-form-urlencoded")
+                    or content_type.startswith("multipart/form-data")
+                ):
+                    request.state.payload = await request.form()
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+                return json_error("Не удалось разобрать тело запроса", 400)
+
+        public_path = request.url.path in {
+            "/api/bootstrap",
+            "/login",
+            "/logout",
+            "/register",
+            "/setup-admin",
+        } or request.url.path.startswith(("/assets/", "/static/"))
+
+        if auth_supported:
+            user = current_user(request)
+            request.state.current_user = user
+            if not public_path:
+                if not user or user.is_disabled:
+                    request.session.clear()
+                    if request.url.path.startswith("/api/") or wants_json(request):
+                        return json_error("Требуется авторизация", 401)
+                    destination = with_query(
+                        route_path("login"),
+                        next=request.url.path
+                        + (f"?{request.url.query}" if request.url.query else ""),
+                    )
+                    return RedirectResponse(destination, status_code=302)
+                if user.must_set_password or not user.password_hash:
+                    if request.url.path.startswith("/api/") or wants_json(request):
+                        return json_error(
+                            "Требуется завершить первичную настройку",
+                            403,
+                        )
+                    return RedirectResponse(
+                        route_path("setup_admin_password"),
+                        status_code=302,
+                    )
+        elif config.web_username and config.web_password:
+            authorization = request.headers.get("authorization", "")
+            username = password = ""
+            if authorization.lower().startswith("basic "):
+                try:
+                    decoded = base64.b64decode(
+                        authorization.split(None, 1)[1],
+                        validate=True,
+                    ).decode("utf-8")
+                    username, password = decoded.split(":", 1)
+                except (binascii.Error, UnicodeDecodeError, ValueError):
+                    pass
+            valid = hmac.compare_digest(username, config.web_username) & hmac.compare_digest(
+                password, config.web_password
+            )
+            if not valid:
+                return PlainTextResponse(
+                    "Требуется авторизация",
+                    status_code=401,
+                    headers={
+                        "WWW-Authenticate": 'Basic realm="TikTok to Telegram"'
+                    },
+                )
+        return await call_next(request)
+
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "same-origin")
+        response.headers.setdefault(
+            "Permissions-Policy",
+            "camera=(), microphone=(), geolocation=()",
+        )
+        if request.url.path.startswith("/api/") or request.url.path in {
+            "/login",
+            "/register",
+            "/setup-admin",
+        }:
+            response.headers.setdefault("Cache-Control", "no-store")
+        return response
+
+    # SessionMiddleware is registered last so request.session is available to
+    # request_context, which is immediately inside it.
+    app.add_middleware(
+        SessionMiddleware,
+        secret_key=secret,
+        same_site="strict",
+        https_only=bool(
+            getattr(config, "web_https", False)
+            or getattr(config, "session_cookie_secure", False)
+        ),
+    )
+
+    assets_directory = SPA_DIRECTORY / "assets"
+    if assets_directory.is_dir():
+        app.mount("/assets", StaticFiles(directory=assets_directory), name="assets")
+    if STATIC_DIRECTORY.is_dir():
+        app.mount(
+            "/static",
+            StaticFiles(directory=STATIC_DIRECTORY),
+            name="static",
+        )
+
+    @app.get("/api/bootstrap", name="api_bootstrap")
+    def api_bootstrap(request: Request) -> dict:
+        return bootstrap_payload(request)
+
+    @app.get("/login", name="login")
+    def login(request: Request) -> Response:
+        if not auth_supported:
+            return RedirectResponse(route_path("index"), status_code=302)
+        admin = auth_storage.get_user(1)
+        if admin and (admin.must_set_password or not admin.password_hash):
+            return RedirectResponse(
+                route_path("setup_admin_password"),
+                status_code=302,
+            )
+        return render_spa()
+
+    @app.post("/login", name="login_post")
+    def login_post(request: Request) -> Response:
+        if not auth_supported:
+            destination = route_path("index")
+            return (
+                success_response(redirect_to=destination)
+                if wants_json(request)
+                else RedirectResponse(destination, status_code=302)
+            )
+        username = request_value(request, "username").strip()
+        password = request_value(request, "password")
+        user = auth_storage.get_user_by_username(username)
+        if (
+            not user
+            or user.is_disabled
+            or not user.password_hash
+            or not check_password_hash(user.password_hash, password)
+        ):
+            return (
+                json_error("Неверный логин или пароль", 401)
+                if wants_json(request)
+                else PlainTextResponse(
+                    "Неверный логин или пароль",
+                    status_code=401,
+                )
+            )
+        login_user(request, user)
+        if user.must_set_password:
+            destination = route_path("setup_admin_password")
+        else:
+            destination = safe_redirect_target(
+                request_value(request, "next"),
+                str(request.base_url),
+            ) or route_path("index")
+        return (
+            success_response(redirect_to=destination)
+            if wants_json(request)
+            else RedirectResponse(destination, status_code=302)
+        )
+
+    @app.api_route(
+        "/setup-admin",
+        methods=["GET", "POST"],
+        name="setup_admin_password",
+    )
+    def setup_admin_password(request: Request) -> Response:
+        if not auth_supported:
+            return RedirectResponse(route_path("index"), status_code=302)
+        admin = auth_storage.get_user(1)
+        if not admin:
+            raise _not_found()
+        logged_user = current_user(request)
+        if admin.password_hash and not (
+            logged_user and logged_user.id == admin.id
+        ):
+            return RedirectResponse(route_path("login"), status_code=302)
+        if request.method == "GET":
+            return render_spa()
+
+        first_setup = bool(admin.must_set_password or not admin.password_hash)
+        if first_setup:
+            configured_username = (
+                getattr(config, "setup_username", None) or config.web_username
+            )
+            configured_password = (
+                getattr(config, "setup_password", None) or config.web_password
+            )
+            valid_bootstrap = verify_bootstrap_credentials(
+                configured_username,
+                configured_password,
+                request_value(request, "setup_username"),
+                request_value(request, "setup_password"),
+            )
+            if not valid_bootstrap:
+                return json_error(
+                    "Для первичной настройки нужны web.username и web.password из config.yaml",
+                    403,
+                ) if wants_json(request) else PlainTextResponse(
+                    "Для первичной настройки нужны web.username и web.password из config.yaml",
+                    status_code=403,
+                )
+        password = request_value(request, "password")
+        confirm = request_value(request, "confirm_password")
+        if len(password) < 8:
+            return json_error(
+                "Пароль должен быть не короче 8 символов"
+            ) if wants_json(request) else PlainTextResponse(
+                "Пароль должен быть не короче 8 символов",
+                status_code=400,
+            )
+        if password != confirm:
+            return json_error("Пароли не совпадают") if wants_json(
+                request
+            ) else PlainTextResponse("Пароли не совпадают", status_code=400)
+        auth_storage.set_user_password(admin.id, generate_password_hash(password))
+        updated_admin = auth_storage.get_user(admin.id)
+        assert updated_admin is not None
+        login_user(request, updated_admin)
+        destination = route_path("index")
+        return (
+            success_response(redirect_to=destination)
+            if wants_json(request)
+            else RedirectResponse(destination, status_code=302)
+        )
+
+    @app.api_route("/register", methods=["GET", "POST"], name="register")
+    def register(request: Request) -> Response:
+        if not auth_supported:
+            return RedirectResponse(route_path("index"), status_code=302)
+        admin = auth_storage.get_user(1)
+        if admin and (admin.must_set_password or not admin.password_hash):
+            if wants_json(request):
+                return json_error(
+                    "Сначала завершите первичную настройку администратора",
+                    403,
+                )
+            return RedirectResponse(
+                route_path("setup_admin_password"),
+                status_code=302,
+            )
+        if request.method == "GET":
+            return render_spa()
+        username = request_value(request, "username").strip()
+        password = request_value(request, "password")
+        confirm = request_value(request, "confirm_password")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{3,32}", username):
+            error = (
+                "Логин: 3-32 символа, латиница, цифры, точка, "
+                "дефис или подчёркивание"
+            )
+            return json_error(error) if wants_json(request) else PlainTextResponse(
+                error,
+                status_code=400,
+            )
+        if len(password) < 8:
+            return json_error(
+                "Пароль должен быть не короче 8 символов"
+            ) if wants_json(request) else PlainTextResponse(
+                "Пароль должен быть не короче 8 символов",
+                status_code=400,
+            )
+        if password != confirm:
+            return json_error("Пароли не совпадают") if wants_json(
+                request
+            ) else PlainTextResponse("Пароли не совпадают", status_code=400)
+        try:
+            user = auth_storage.create_user(
+                username,
+                generate_password_hash(password),
+            )
+        except Exception:
+            return json_error("Логин уже занят") if wants_json(
+                request
+            ) else PlainTextResponse("Логин уже занят", status_code=400)
+        login_user(request, user)
+        destination = route_path("index")
+        return (
+            success_response(redirect_to=destination)
+            if wants_json(request)
+            else RedirectResponse(destination, status_code=302)
+        )
+
+    @app.post("/logout", name="logout")
+    def logout(request: Request) -> Response:
+        request.session.clear()
+        destination = route_path("login")
+        return (
+            success_response(redirect_to=destination)
+            if wants_json(request)
+            else RedirectResponse(destination, status_code=302)
+        )
+
+    @app.get("/admin/users", name="admin_users")
+    def admin_users(request: Request) -> Response:
+        require_admin(request)
+        return render_spa()
+
+    @app.get("/api/admin/users", name="api_admin_users")
+    def api_admin_users(request: Request, page: int = 1) -> dict:
+        require_admin(request)
+        page = max(1, page)
         per_page = 20
         total = auth_storage.user_count()
         pages = max(1, math.ceil(total / per_page))
         page = min(page, pages)
         users = auth_storage.users(limit=per_page, offset=(page - 1) * per_page)
-        return render_template(
-            "admin_users.html",
-            users=users,
-            page=page,
-            pages=pages,
-            total=total,
-        )
+        return {
+            "users": [user_payload(user) for user in users],
+            "page": page,
+            "pages": pages,
+            "total": total,
+        }
 
-    @app.get("/admin/users/<int:user_id>")
-    def admin_user_detail(user_id: int):
-        require_admin()
+    @app.get("/admin/users/{user_id}", name="admin_user_detail")
+    def admin_user_detail(request: Request, user_id: int) -> Response:
+        require_admin(request)
+        if not auth_storage.get_user(user_id):
+            raise _not_found()
+        return render_spa()
+
+    @app.get("/api/admin/users/{user_id}", name="api_admin_user_detail")
+    def api_admin_user_detail(request: Request, user_id: int) -> dict:
+        require_admin(request)
         user = auth_storage.get_user(user_id)
         if not user:
-            abort(404)
-        return render_template("admin_user.html", user=user)
+            raise _not_found()
+        return {
+            "user": user_payload(user),
+            "services": [
+                {"id": name, **metadata}
+                for name, metadata in SERVICE_META.items()
+            ],
+        }
 
-    @app.post("/admin/users/<int:user_id>")
-    def admin_user_update(user_id: int):
-        require_admin()
+    @app.post("/admin/users/{user_id}", name="admin_user_update")
+    def admin_user_update(request: Request, user_id: int) -> Response:
+        admin = require_admin(request)
         user = auth_storage.get_user(user_id)
         if not user:
-            abort(404)
+            raise _not_found()
+        username = request_value(request, "username", user.username).strip()
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{3,32}", username):
+            return json_error(
+                "Логин: 3-32 символа, латиница, цифры, точка, дефис или подчёркивание"
+            )
+        existing_user = auth_storage.get_user_by_username(username)
+        if existing_user and existing_user.id != user_id:
+            return json_error("Логин уже занят", 409)
+        is_admin = request_bool(request, "is_admin")
+        is_disabled = request_bool(request, "is_disabled")
+        if user_id == admin.id:
+            is_admin = True
+            is_disabled = False
         auth_storage.update_user(
             user_id,
-            username=request.form.get("username", user.username),
-            is_admin=request.form.get("is_admin") == "on",
-            is_disabled=request.form.get("is_disabled") == "on",
-            allow_tiktok=request.form.get("allow_tiktok") == "on",
-            allow_instagram=request.form.get("allow_instagram") == "on",
-            allow_youtube=request.form.get("allow_youtube") == "on",
-            allow_spotify=request.form.get("allow_spotify") == "on",
+            username=username,
+            is_admin=is_admin,
+            is_disabled=is_disabled,
+            **{
+                f"allow_{name}": request_bool(request, f"allow_{name}")
+                for name in SERVICE_META
+            },
         )
-        return redirect(url_for("admin_user_detail", user_id=user_id, saved="1"))
+        if wants_json(request):
+            return success_response(
+                user=user_payload(auth_storage.get_user(user_id))
+            )
+        return RedirectResponse(
+            with_query(
+                route_path("admin_user_detail", user_id=user_id),
+                saved="1",
+            ),
+            status_code=302,
+        )
 
-    @app.post("/admin/users/<int:user_id>/toggle-disabled")
-    def admin_user_toggle_disabled(user_id: int):
-        admin = require_admin()
+    @app.post(
+        "/admin/users/{user_id}/toggle-disabled",
+        name="admin_user_toggle_disabled",
+    )
+    def admin_user_toggle_disabled(request: Request, user_id: int) -> Response:
+        admin = require_admin(request)
         user = auth_storage.get_user(user_id)
         if not user:
-            abort(404)
+            raise _not_found()
         if user.id == admin.id:
-            abort(400)
+            raise HTTPException(status_code=400, detail="Bad request")
         auth_storage.update_user(
             user_id,
             username=user.username,
             is_admin=user.is_admin,
             is_disabled=not user.is_disabled,
-            allow_tiktok=user.allow_tiktok,
-            allow_instagram=user.allow_instagram,
-            allow_youtube=user.allow_youtube,
-            allow_spotify=user.allow_spotify,
+            **{
+                f"allow_{name}": bool(
+                    getattr(user, f"allow_{name}", False)
+                )
+                for name in SERVICE_META
+            },
         )
-        return redirect(url_for("admin_users", page=request.args.get("page", "1")))
+        if wants_json(request):
+            return success_response(
+                user=user_payload(auth_storage.get_user(user_id))
+            )
+        return RedirectResponse(route_path("admin_users"), status_code=302)
 
-    @app.get("/admin/users/<int:user_id>/settings")
-    def admin_user_settings(user_id: int):
-        require_admin()
-        user = auth_storage.get_user(user_id)
-        if not user:
-            abort(404)
-        return render_template(
-            "settings.html",
-            **index_context(
-                settings_user_id=user_id,
-                settings_open=True,
-                admin_settings_mode=True,
-            ),
+    @app.get(
+        "/admin/users/{user_id}/settings",
+        name="admin_user_settings",
+    )
+    def admin_user_settings(request: Request, user_id: int) -> Response:
+        require_admin(request)
+        if not auth_storage.get_user(user_id):
+            raise _not_found()
+        return RedirectResponse(
+            with_query(route_path("settings"), user_id=user_id),
+            status_code=302,
         )
 
-    @app.get("/")
-    def index() -> str:
-        return render_template("index.html", **index_context())
+    @app.get("/", name="index")
+    def index() -> Response:
+        return render_spa()
 
-    @app.get("/settings")
-    def settings() -> str:
-        return render_template("settings.html", **index_context())
+    @app.get("/settings", name="settings")
+    def settings() -> Response:
+        return render_spa()
 
-    @app.post("/settings/telegram")
-    def add_telegram_channel():
-        user_id = settings_user_id()
+    @app.get("/api/settings", name="api_settings")
+    def api_settings(request: Request, user_id: int | None = None) -> dict:
+        selected_user_id = active_user_id(request)
+        if user_id is not None:
+            current = getattr(request.state, "current_user", None)
+            if not current or not current.is_admin:
+                raise HTTPException(status_code=403, detail="Forbidden")
+            if not auth_storage.get_user(user_id):
+                raise _not_found()
+            selected_user_id = user_id
+        return settings_payload(request, selected_user_id)
+
+    @app.post("/settings/telegram", name="add_telegram_channel")
+    def add_telegram_channel(request: Request) -> Response:
+        user_id = settings_user_id(request)
         try:
             service.add_telegram_destination(
                 *with_user_arg(
                     (
-                        request.form.get("name", ""),
-                        request.form.get("chat_id", ""),
-                        request.form.get("bot_token", ""),
+                        request_value(request, "name"),
+                        request_value(request, "chat_id"),
+                        request_value(request, "bot_token"),
                     ),
                     user_id,
                 )
             )
-            if user_id != active_user_id():
-                return redirect(url_for("admin_user_settings", user_id=user_id, settings="telegram-added"))
-            return redirect(url_for("settings", settings="telegram-added"))
-        except Exception as error:
-            LOGGER.warning("Failed to add Telegram destination: %s", type(error).__name__)
-            return render_template(
-                "settings.html",
-                **index_context(
-                    settings_user_id=user_id,
-                    settings_error=str(error),
-                    settings_open=True,
-                ),
-            ), 400
-
-    @app.post("/settings/telegram/discover")
-    def discover_telegram_channels():
-        user_id = settings_user_id()
-        try:
-            found = service.discover_telegram_destinations(
-                *with_user_arg((request.form.get("bot_token", ""),), user_id)
-            )
-            if user_id != active_user_id():
-                return redirect(
-                    url_for(
-                        "admin_user_settings",
-                        user_id=user_id,
-                        settings="telegram-discovered",
-                        found=len(found),
-                    )
-                )
-            return redirect(url_for("settings", settings="telegram-discovered", found=len(found)))
+            return settings_result(request, user_id, "telegram-added")
         except Exception as error:
             LOGGER.warning(
-                "Failed to discover Telegram destinations: %s", type(error).__name__
+                "Failed to add Telegram destination: %s",
+                type(error).__name__,
             )
-            return render_template(
-                "settings.html",
-                **index_context(
-                    settings_user_id=user_id,
-                    settings_error=str(error),
-                    settings_open=True,
-                ),
-            ), 400
+            return settings_failure(request, error)
 
-    @app.post("/settings/telegram/delete")
-    def delete_telegram_channel():
-        user_id = settings_user_id()
+    @app.post(
+        "/settings/telegram/discover",
+        name="discover_telegram_channels",
+    )
+    def discover_telegram_channels(request: Request) -> Response:
+        user_id = settings_user_id(request)
+        try:
+            found = service.discover_telegram_destinations(
+                *with_user_arg(
+                    (request_value(request, "bot_token"),),
+                    user_id,
+                )
+            )
+            return settings_result(
+                request,
+                user_id,
+                "telegram-discovered",
+                found=len(found),
+            )
+        except Exception as error:
+            LOGGER.warning(
+                "Failed to discover Telegram destinations: %s",
+                type(error).__name__,
+            )
+            return settings_failure(request, error)
+
+    @app.post(
+        "/settings/telegram/delete",
+        name="delete_telegram_channel",
+    )
+    def delete_telegram_channel(request: Request) -> Response:
+        user_id = settings_user_id(request)
         try:
             service.delete_telegram_destination(
-                *with_user_arg((request.form.get("chat_id", ""),), user_id)
+                *with_user_arg(
+                    (request_value(request, "chat_id"),),
+                    user_id,
+                )
             )
-            if user_id != active_user_id():
-                return redirect(url_for("admin_user_settings", user_id=user_id, settings="telegram-deleted"))
-            return redirect(url_for("settings", settings="telegram-deleted"))
+            return settings_result(request, user_id, "telegram-deleted")
         except Exception as error:
-            return render_template(
-                "settings.html",
-                **index_context(
-                    settings_user_id=user_id,
-                    settings_error=str(error),
-                    settings_open=True,
-                ),
-            ), 400
+            return settings_failure(request, error)
 
-    @app.post("/settings/telegram/move")
-    def move_telegram_channel():
-        user_id = settings_user_id()
+    @app.post("/settings/telegram/move", name="move_telegram_channel")
+    def move_telegram_channel(request: Request) -> Response:
+        user_id = settings_user_id(request)
         try:
             service.move_telegram_destination(
                 *with_user_arg(
                     (
-                        request.form.get("chat_id", ""),
-                        request.form.get("direction", ""),
+                        request_value(request, "chat_id"),
+                        request_value(request, "direction"),
                     ),
                     user_id,
                 )
             )
-            if request.headers.get("X-Requested-With") == "fetch":
-                return jsonify(
-                    {
-                        "channels": [
-                            {"chat_id": channel.chat_id}
-                            for channel in telegram_channels(user_id)
-                        ]
-                    }
-                )
-            if user_id != active_user_id():
-                return redirect(url_for("admin_user_settings", user_id=user_id, settings="telegram-moved"))
-            return redirect(url_for("settings", settings="telegram-moved"))
+            return settings_result(request, user_id, "telegram-moved")
         except Exception as error:
-            if request.headers.get("X-Requested-With") == "fetch":
-                return jsonify({"error": str(error)}), 400
-            return render_template(
-                "settings.html",
-                **index_context(
-                    settings_user_id=user_id,
-                    settings_error=str(error),
-                    settings_open=True,
-                )
-            ), 400
+            return settings_failure(request, error)
 
-    @app.post("/settings/tiktok/monitor")
-    def add_monitored_tiktok_channel():
-        user_id = settings_user_id()
+    @app.post(
+        "/settings/tiktok/monitor",
+        name="add_monitored_tiktok_channel",
+    )
+    def add_monitored_tiktok_channel(request: Request) -> Response:
+        user_id = settings_user_id(request)
         try:
+            require_service(request, "tiktok", user_id)
             service.add_monitored_tiktok_channel(
-                *with_user_arg((request.form.get("channel", ""),), user_id)
-            )
-            if user_id != active_user_id():
-                return redirect(url_for("admin_user_settings", user_id=user_id, settings="tiktok-monitor-added"))
-            return redirect(url_for("settings", settings="tiktok-monitor-added"))
-        except Exception as error:
-            return render_template(
-                "settings.html",
-                **index_context(
-                    settings_user_id=user_id,
-                    settings_error=str(error),
-                    settings_open=True,
+                *with_user_arg(
+                    (request_value(request, "channel"),),
+                    user_id,
                 )
-            ), 400
+            )
+            return settings_result(request, user_id, "tiktok-monitor-added")
+        except Exception as error:
+            return settings_failure(request, error)
 
-    @app.post("/settings/tiktok/monitor/delete")
-    def delete_monitored_tiktok_channel():
-        user_id = settings_user_id()
+    @app.post(
+        "/settings/tiktok/monitor/delete",
+        name="delete_monitored_tiktok_channel",
+    )
+    def delete_monitored_tiktok_channel(request: Request) -> Response:
+        user_id = settings_user_id(request)
         try:
+            require_service(request, "tiktok", user_id)
             service.delete_monitored_tiktok_channel(
-                *with_user_arg((request.form.get("channel", ""),), user_id)
-            )
-            if user_id != active_user_id():
-                return redirect(url_for("admin_user_settings", user_id=user_id, settings="tiktok-monitor-deleted"))
-            return redirect(url_for("settings", settings="tiktok-monitor-deleted"))
-        except Exception as error:
-            return render_template(
-                "settings.html",
-                **index_context(
-                    settings_user_id=user_id,
-                    settings_error=str(error),
-                    settings_open=True,
+                *with_user_arg(
+                    (request_value(request, "channel"),),
+                    user_id,
                 )
-            ), 400
+            )
+            return settings_result(request, user_id, "tiktok-monitor-deleted")
+        except Exception as error:
+            return settings_failure(request, error)
 
-    @app.post("/settings/tiktok/interval")
-    def update_tiktok_interval():
-        user_id = settings_user_id()
+    @app.post(
+        "/settings/tiktok/interval",
+        name="update_tiktok_interval",
+    )
+    def update_tiktok_interval(request: Request) -> Response:
+        user_id = settings_user_id(request)
         try:
+            require_service(request, "tiktok", user_id)
             service.set_poll_interval_seconds(
-                *with_user_arg((request.form.get("poll_interval_seconds", ""),), user_id)
-            )
-            if user_id != active_user_id():
-                return redirect(url_for("admin_user_settings", user_id=user_id, settings="tiktok-interval-updated"))
-            return redirect(url_for("settings", settings="tiktok-interval-updated"))
-        except Exception as error:
-            return render_template(
-                "settings.html",
-                **index_context(
-                    settings_user_id=user_id,
-                    settings_error=str(error),
-                    settings_open=True,
+                *with_user_arg(
+                    (request_value(request, "poll_interval_seconds"),),
+                    user_id,
                 )
-            ), 400
+            )
+            return settings_result(request, user_id, "tiktok-interval-updated")
+        except Exception as error:
+            return settings_failure(request, error)
 
-    @app.post("/settings/cookies/<service_name>")
-    def update_cookies(service_name: str):
-        user_id = settings_user_id()
+    @app.post("/settings/cookies/{service_name}", name="update_cookies")
+    def update_cookies(request: Request, service_name: str) -> Response:
+        user_id = settings_user_id(request)
         try:
-            require_service(service_name, user_id)
-            uploaded = request.files.get("cookies_file")
-            if not uploaded or not uploaded.filename:
+            require_service(request, service_name, user_id)
+            uploaded = payload(request).get("cookies_file")
+            if (
+                not isinstance(uploaded, UploadFile)
+                or not uploaded.filename
+            ):
                 raise ValueError("Выберите cookies.txt")
-            service.update_cookies(*with_user_arg((service_name, uploaded.read()), user_id))
-            if user_id != active_user_id():
-                return redirect(url_for("admin_user_settings", user_id=user_id, settings=f"{service_name}-cookies-updated"))
-            return redirect(url_for("settings", settings=f"{service_name}-cookies-updated"))
+            content = uploaded.file.read()
+            service.update_cookies(
+                *with_user_arg((service_name, content), user_id)
+            )
+            return settings_result(
+                request,
+                user_id,
+                f"{service_name}-cookies-updated",
+            )
         except Exception as error:
-            LOGGER.exception("Failed to update %s cookies", service_name)
-            return render_template(
-                "settings.html",
-                **index_context(
-                    settings_user_id=user_id,
-                    settings_error=str(error),
-                    settings_open=True,
-                ),
-            ), 400
+            LOGGER.warning(
+                "Failed to update %s cookies: %s",
+                service_name,
+                type(error).__name__,
+            )
+            return settings_failure(request, error)
 
-    @app.post("/prepare")
-    @app.post("/tiktok/prepare")
-    def prepare():
-        user_id = active_user_id()
-        tiktok_url = request.form.get("tiktok_url", "").strip()
-        selected_chat_id = request.form.get("chat_id", "")
+    @app.post("/prepare", name="prepare")
+    @app.post("/tiktok/prepare", name="tiktok_prepare")
+    def prepare(request: Request) -> Response:
+        user_id = active_user_id(request)
+        media_url = request_value(request, "tiktok_url").strip()
+        selected_chat_id = request_value(request, "chat_id")
         try:
-            selected_chat_id = validate_chat_id(selected_chat_id, user_id)
-            if is_instagram_url(tiktok_url) or is_tiktok_video_url(tiktok_url):
-                platform = "instagram" if is_instagram_url(tiktok_url) else "tiktok"
-                require_service(platform, user_id)
-                video, path = service.prepare_url(
-                    *with_user_arg((tiktok_url,), user_id)
+            selected_chat_id = validate_chat_id(
+                request,
+                selected_chat_id,
+                user_id,
+            )
+            platform = detect_media_platform(media_url)
+            is_single_post = (
+                platform != "tiktok" or is_tiktok_video_url(media_url)
+            )
+            if is_single_post:
+                require_service(request, platform, user_id)
+                video, paths = service.prepare_url(
+                    *with_user_arg((media_url,), user_id)
                 )
-                job = jobs.add(video, path, selected_chat_id, user_id)
-                return render_template(
-                    "edit.html",
-                    job=job,
-                    telegram_channels=telegram_channels(user_id),
-                    service_permissions=service_permissions(user_id),
+                job = jobs.add(
+                    video,
+                    paths,
+                    selected_chat_id,
+                    user_id,
                 )
-            require_service("tiktok", user_id)
-            post_existing = request.form.get("post_existing") == "on"
+                job_payload = prepared_job_payload(
+                    request,
+                    job,
+                    selected_chat_id,
+                )
+                if wants_json(request):
+                    return success_response(job=job_payload)
+                return RedirectResponse(
+                    job_payload["post_url"],
+                    status_code=302,
+                )
+            require_service(request, "tiktok", user_id)
+            post_existing = request_bool(request, "post_existing")
             found, published = service.import_channel(
-                *with_user_arg((tiktok_url, post_existing, selected_chat_id), user_id)
+                *with_user_arg(
+                    (
+                        media_url,
+                        post_existing,
+                        selected_chat_id,
+                    ),
+                    user_id,
+                )
             )
-            return render_template(
-                "channel_result.html",
-                channel=tiktok_url,
-                found=found,
-                published=published,
-                post_existing=post_existing,
+            if wants_json(request):
+                return success_response(
+                    channel=media_url,
+                    found=found,
+                    published=published,
+                    post_existing=post_existing,
+                )
+            return RedirectResponse(
+                with_query(
+                    route_path("index"),
+                    channel=media_url,
+                    found=found,
+                    published=published,
+                ),
+                status_code=302,
             )
         except Exception as error:
-            LOGGER.exception("Failed to prepare URL %s", tiktok_url)
-            return render_template(
-                "index.html",
-                error=str(error),
-                tiktok_url=tiktok_url,
-                telegram_channels=telegram_channels(user_id),
-                selected_chat_id=selected_chat_id,
-                service_permissions=service_permissions(user_id),
-            ), 400
+            LOGGER.exception("Failed to prepare URL %s", media_url)
+            return (
+                json_error(error)
+                if wants_json(request)
+                else PlainTextResponse(str(error), status_code=400)
+            )
 
-    @app.post("/media/info")
-    def media_info():
-        user_id = active_user_id()
-        media_url = request.form.get("media_url", "").strip()
+    @app.post("/media/info", name="media_info")
+    def media_info(request: Request) -> Response:
+        user_id = active_user_id(request)
+        media_url = request_value(request, "media_url").strip()
         try:
-            platform = "instagram" if is_instagram_url(media_url) else "tiktok"
-            require_service(platform, user_id)
-            video, path = service.prepare_url(*with_user_arg((media_url,), user_id))
-            selected_chat_id = validate_chat_id(request.form.get("chat_id", ""), user_id)
-            job = jobs.add(video, path, selected_chat_id, user_id)
-            return jsonify(
+            platform = detect_media_platform(media_url)
+            require_service(request, platform, user_id)
+            selected_chat_id = validate_chat_id(
+                request,
+                request_value(request, "chat_id"),
+                user_id,
+            )
+            video, paths = service.prepare_url(
+                *with_user_arg((media_url,), user_id)
+            )
+            job = jobs.add(video, paths, selected_chat_id, user_id)
+            result = prepared_job_payload(request, job, selected_chat_id)
+            return JSONResponse(
                 {
-                    "job_id": job.job_id,
+                    **result,
                     "description": video.description,
-                    "author": f"@{video.username}",
-                    "preview_url": url_for("preview", job_id=job.job_id),
-                    "preview_urls": [
-                        url_for(
-                            "preview_item",
-                            job_id=job.job_id,
-                            item_index=item_index,
-                        )
-                        for item_index in range(len(job.paths))
-                    ]
-                    if video.media_type == "image"
-                    else [],
-                    "video_download_url": url_for("media_video", job_id=job.job_id),
-                    "post_url": url_for(
-                        "media_post", job_id=job.job_id, chat_id=selected_chat_id
-                    ),
+                    "author": result["post"]["author"],
+                    "video_download_url": result["download_url"],
                     "media_type": video.media_type,
-                    "image_count": len(job.paths) if video.media_type == "image" else 0,
+                    "image_count": (
+                        len(job.paths) if video.media_type == "image" else 0
+                    ),
                 }
             )
         except Exception as error:
             LOGGER.exception("Failed to inspect media URL %s", media_url)
-            return jsonify({"error": str(error)}), 400
+            return JSONResponse({"error": str(error)}, status_code=400)
 
-    @app.get("/media/video/<job_id>")
-    def media_video(job_id: str):
+    @app.get("/media/video/{job_id}", name="media_video")
+    def media_video(request: Request, job_id: str) -> Response:
         job = jobs.get(job_id)
-        if job.user_id != active_user_id():
-            abort(404)
-        if job.video.media_type == "image" and len(job.paths) > 1:
+        if job.user_id != active_user_id(request):
+            raise _not_found()
+        base_name = (
+            f"{_secure_filename(job.video.username) or 'post'}-"
+            f"{_secure_filename(job.video.video_id) or 'media'}"
+        )
+        if not job.paths:
+            text = (job.video.description or "").strip()
+            canonical_url = (job.video.url or "").strip()
+            if canonical_url and canonical_url not in text:
+                text = f"{text}\n\n{canonical_url}".strip()
+            return Response(
+                text.encode("utf-8"),
+                media_type="text/plain; charset=utf-8",
+                headers={
+                    "Content-Disposition": (
+                        f'attachment; filename="{base_name}.txt"'
+                    )
+                },
+            )
+        if len(job.paths) > 1:
             archive = BytesIO()
             with ZipFile(archive, "w", ZIP_DEFLATED) as zip_file:
                 for index, path in enumerate(job.paths, start=1):
-                    zip_file.write(path, f"{job.video.video_id}-{index:02d}{path.suffix}")
-            archive.seek(0)
-            return send_file(
-                archive,
-                mimetype="application/zip",
-                as_attachment=True,
-                download_name=f"{secure_filename(job.video.username)}-{job.video.video_id}-images.zip",
+                    zip_file.write(
+                        path,
+                        f"{job.video.video_id}-{index:02d}{path.suffix}",
+                    )
+            return Response(
+                archive.getvalue(),
+                media_type="application/zip",
+                headers={
+                    "Content-Disposition": (
+                        f'attachment; filename="{base_name}-media.zip"'
+                    )
+                },
             )
-        return send_file(
+        return FileResponse(
             job.path,
-            as_attachment=True,
-            download_name=f"{secure_filename(job.video.username)}-{job.video.video_id}{job.path.suffix}",
-            conditional=True,
+            filename=f"{base_name}{job.path.suffix}",
         )
 
-    @app.get("/media/post/<job_id>")
-    def media_post(job_id: str):
+    @app.get("/media/post/{job_id}", name="media_post")
+    def media_post(request: Request, job_id: str) -> Response:
         job = jobs.get(job_id)
-        if job.user_id != active_user_id():
-            abort(404)
-        selected_chat_id = request.args.get("chat_id") or job.selected_chat_id
-        return render_template(
-            "edit.html",
-            job=job,
-            telegram_channels=telegram_channels(job.user_id),
-            selected_chat_id=selected_chat_id,
-            service_permissions=service_permissions(job.user_id),
+        if job.user_id != active_user_id(request):
+            raise _not_found()
+        return render_spa()
+
+    @app.get("/api/media/jobs/{job_id}", name="api_media_job")
+    def api_media_job(
+        request: Request,
+        job_id: str,
+        chat_id: str | None = None,
+    ) -> Response:
+        job = jobs.get(job_id)
+        if job.user_id != active_user_id(request):
+            raise _not_found()
+        try:
+            selected_chat_id = (
+                validate_chat_id(request, chat_id, job.user_id)
+                if chat_id
+                else job.selected_chat_id
+            )
+        except ValueError as error:
+            return json_error(error)
+        return JSONResponse(
+            prepared_job_payload(
+                request,
+                job,
+                selected_chat_id,
+            )
         )
 
-    @app.post("/youtube/info")
-    def youtube_info():
-        user_id = active_user_id()
-        youtube_url = request.form.get("youtube_url", "").strip()
+    @app.post("/youtube/info", name="youtube_info")
+    def youtube_info(request: Request) -> Response:
+        user_id = active_user_id(request)
+        youtube_url = request_value(request, "youtube_url").strip()
         try:
-            require_service("youtube", user_id)
-            video = service.get_youtube_info(*with_user_arg((youtube_url,), user_id))
+            require_service(request, "youtube", user_id)
+            video = service.get_youtube_info(
+                *with_user_arg((youtube_url,), user_id)
+            )
             job = youtube_jobs.add(video, user_id)
-            return jsonify(
+            result = youtube_job_payload(request, job)
+            return JSONResponse(
                 {
-                    "job_id": job.job_id,
+                    **result,
                     "title": video.title,
                     "channel": video.channel,
                     "duration": video.duration,
                     "thumbnail_url": video.thumbnail_url,
-                    "thumbnail_download_url": url_for("youtube_thumbnail", job_id=job.job_id),
-                    "video_download_url": url_for("youtube_video", job_id=job.job_id),
-                    "post_url": url_for("youtube_post", job_id=job.job_id),
                 }
             )
         except Exception as error:
             LOGGER.exception("Failed to inspect YouTube URL %s", youtube_url)
-            return jsonify({"error": str(error)}), 400
+            return JSONResponse({"error": str(error)}, status_code=400)
 
-    @app.post("/spotify/info")
-    def spotify_info():
-        user_id = active_user_id()
-        spotify_url = request.form.get("spotify_url", "").strip()
+    @app.post("/spotify/info", name="spotify_info")
+    def spotify_info(request: Request) -> Response:
+        user_id = active_user_id(request)
+        spotify_url = request_value(request, "spotify_url").strip()
         try:
-            require_service("spotify", user_id)
+            require_service(request, "spotify", user_id)
             track = service.get_spotify_info(
                 *with_user_arg((spotify_url,), user_id)
             )
-            selected_chat_id = request.form.get("chat_id", "").strip()
+            selected_chat_id = request_value(request, "chat_id").strip()
             if selected_chat_id:
-                selected_chat_id = validate_chat_id(selected_chat_id, user_id)
-            return jsonify(
+                selected_chat_id = validate_chat_id(
+                    request,
+                    selected_chat_id,
+                    user_id,
+                )
+            return JSONResponse(
                 {
+                    "track": spotify_payload(track),
+                    "track_id": track.track_id,
                     "title": track.title,
                     "artist": track.artist,
                     "thumbnail_url": track.thumbnail_url,
-                    "audio_download_url": url_for(
-                        "spotify_audio", track_id=track.track_id
-                    ),
-                    "post_url": url_for(
-                        "spotify_post",
+                    "audio_download_url": route_path(
+                        "spotify_audio",
                         track_id=track.track_id,
+                    ),
+                    "post_url": with_query(
+                        route_path(
+                            "spotify_post",
+                            track_id=track.track_id,
+                        ),
                         chat_id=selected_chat_id,
                     ),
                 }
             )
         except Exception as error:
             LOGGER.exception("Failed to inspect Spotify URL %s", spotify_url)
-            return jsonify({"error": str(error)}), 400
+            return JSONResponse({"error": str(error)}, status_code=400)
 
-    @app.get("/spotify/audio/<track_id>")
-    def spotify_audio(track_id: str):
-        user_id = active_user_id()
+    @app.get("/spotify/audio/{track_id}", name="spotify_audio")
+    def spotify_audio(request: Request, track_id: str) -> Response:
+        user_id = active_user_id(request)
         try:
-            require_service("spotify", user_id)
+            require_service(request, "spotify", user_id)
             track = service.get_spotify_info(
                 *with_user_arg(
                     (f"https://open.spotify.com/track/{track_id}",),
@@ -865,47 +1458,67 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
                     user_id,
                 )
             )
-            filename = secure_filename(track.title).strip("._")
-            return send_file(
+            filename = _secure_filename(track.title) or track.track_id
+            return FileResponse(
                 path,
-                mimetype="audio/mpeg",
-                as_attachment=True,
-                download_name=f"{filename or track.track_id}.mp3",
-                conditional=True,
+                media_type="audio/mpeg",
+                filename=f"{filename}.mp3",
             )
         except Exception as error:
             LOGGER.exception("Failed to download Spotify track %s", track_id)
-            return jsonify({"error": str(error)}), 400
+            return JSONResponse({"error": str(error)}, status_code=400)
 
-    @app.get("/spotify/post/<track_id>")
-    def spotify_post(track_id: str):
-        user_id = active_user_id()
-        require_service("spotify", user_id)
+    @app.get("/spotify/post/{track_id}", name="spotify_post")
+    def spotify_post(request: Request, track_id: str) -> Response:
+        require_service(request, "spotify", active_user_id(request))
+        return render_spa()
+
+    @app.get("/api/spotify/tracks/{track_id}", name="api_spotify_track")
+    def api_spotify_track(
+        request: Request,
+        track_id: str,
+        chat_id: str = "",
+    ) -> dict:
+        user_id = active_user_id(request)
+        require_service(request, "spotify", user_id)
         track = service.get_spotify_info(
             *with_user_arg(
                 (f"https://open.spotify.com/track/{track_id}",),
                 user_id,
             )
         )
-        return render_template(
-            "spotify_edit.html",
-            track=track,
-            telegram_channels=telegram_channels(user_id),
-            selected_chat_id=request.args.get("chat_id", ""),
-            service_permissions=service_permissions(user_id),
-        )
+        return {
+            "track": spotify_payload(track),
+            "selected_chat_id": chat_id,
+            "audio_download_url": route_path(
+                "spotify_audio",
+                track_id=track.track_id,
+            ),
+            "send_url": route_path(
+                "spotify_send",
+                track_id=track.track_id,
+            ),
+            "telegram_channels": [
+                channel_payload(channel)
+                for channel in telegram_channels(request, user_id)
+            ],
+        }
 
-    @app.post("/spotify/send/<track_id>")
-    def spotify_send(track_id: str):
-        user_id = active_user_id()
-        before_text = request.form.get("before_text", "")
-        after_text = request.form.get("after_text", "")
-        caption_html = request.form.get("caption_html")
-        selected_chat_id = request.form.get("chat_id", "")
-        track = None
+    @app.post("/spotify/send/{track_id}", name="spotify_send")
+    def spotify_send(request: Request, track_id: str) -> Response:
+        user_id = active_user_id(request)
+        before_text = request_value(request, "before_text")
+        after_text = request_value(request, "after_text")
+        caption_html = request_optional_value(request, "caption_html")
+        selected_chat_id = request_value(request, "chat_id")
+        track: SpotifyTrack | None = None
         try:
-            require_service("spotify", user_id)
-            selected_chat_id = validate_chat_id(selected_chat_id, user_id)
+            require_service(request, "spotify", user_id)
+            selected_chat_id = validate_chat_id(
+                request,
+                selected_chat_id,
+                user_id,
+            )
             track = service.get_spotify_info(
                 *with_user_arg(
                     (f"https://open.spotify.com/track/{track_id}",),
@@ -931,81 +1544,92 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
                     user_id,
                 )
             )
-            return redirect(url_for("done", source="spotify"))
+            destination = with_query(route_path("done"), source="spotify")
+            return (
+                success_response(redirect_to=destination)
+                if wants_json(request)
+                else RedirectResponse(destination, status_code=302)
+            )
         except Exception as error:
             LOGGER.exception("Failed to publish Spotify track %s", track_id)
-            if track is None:
-                return jsonify({"error": str(error)}), 400
-            return render_template(
-                "spotify_edit.html",
-                track=track,
-                telegram_channels=telegram_channels(user_id),
-                selected_chat_id=selected_chat_id,
-                before_text=before_text,
-                after_text=after_text,
-                caption_html=caption_html,
-                error=str(error),
-            ), 502
+            return (
+                json_error(error, 502 if track is not None else 400)
+                if wants_json(request)
+                else PlainTextResponse(
+                    str(error),
+                    status_code=502 if track is not None else 400,
+                )
+            )
 
-    @app.get("/youtube/thumbnail/<job_id>")
-    def youtube_thumbnail(job_id: str):
+    @app.get("/youtube/thumbnail/{job_id}", name="youtube_thumbnail")
+    def youtube_thumbnail(request: Request, job_id: str) -> Response:
         job = youtube_jobs.get(job_id)
-        if job.user_id != active_user_id():
-            abort(404)
-        response = requests.get(job.video.thumbnail_url, timeout=60)
-        response.raise_for_status()
-        filename = secure_filename(job.video.title) or "youtube-thumbnail"
-        content_type = response.headers.get("Content-Type", "image/jpeg")
+        if job.user_id != active_user_id(request):
+            raise _not_found()
+        remote = requests.get(job.video.thumbnail_url, timeout=60)
+        remote.raise_for_status()
+        filename = _secure_filename(job.video.title) or "youtube-thumbnail"
+        content_type = remote.headers.get("Content-Type", "image/jpeg")
         extension = ".webp" if "webp" in content_type else ".jpg"
-        return send_file(
-            BytesIO(response.content),
-            mimetype=content_type,
-            as_attachment=True,
-            download_name=f"{filename}{extension}",
+        return Response(
+            remote.content,
+            media_type=content_type,
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{filename}{extension}"'
+                )
+            },
         )
 
-    @app.get("/youtube/video/<job_id>")
-    def youtube_video(job_id: str):
+    @app.get("/youtube/video/{job_id}", name="youtube_video")
+    def youtube_video(request: Request, job_id: str) -> Response:
         job = youtube_jobs.get(job_id)
-        if job.user_id != active_user_id():
-            abort(404)
+        if job.user_id != active_user_id(request):
+            raise _not_found()
         if not job.path or not job.path.exists():
             path = service.download_youtube(
-                *with_user_arg((job.video, f"youtube-{job.job_id}"), job.user_id)
+                *with_user_arg(
+                    (job.video, f"youtube-{job.job_id}"),
+                    job.user_id,
+                )
             )
             youtube_jobs.set_path(job.job_id, path)
             job.path = path
-        filename = secure_filename(job.video.title) or "youtube-video"
-        return send_file(
+        filename = _secure_filename(job.video.title) or "youtube-video"
+        return FileResponse(
             job.path,
-            as_attachment=True,
-            download_name=f"{filename}{job.path.suffix}",
-            conditional=True,
+            filename=f"{filename}{job.path.suffix}",
         )
 
-    @app.get("/youtube/post/<job_id>")
-    def youtube_post(job_id: str):
+    @app.get("/youtube/post/{job_id}", name="youtube_post")
+    def youtube_post(request: Request, job_id: str) -> Response:
         job = youtube_jobs.get(job_id)
-        if job.user_id != active_user_id():
-            abort(404)
-        return render_template(
-            "youtube_edit.html",
-            job=job,
-            telegram_channels=telegram_channels(job.user_id),
-            service_permissions=service_permissions(job.user_id),
-        )
+        if job.user_id != active_user_id(request):
+            raise _not_found()
+        return render_spa()
 
-    @app.post("/youtube/send/<job_id>")
-    def youtube_send(job_id: str):
+    @app.get("/api/youtube/jobs/{job_id}", name="api_youtube_job")
+    def api_youtube_job(request: Request, job_id: str) -> dict:
         job = youtube_jobs.get(job_id)
-        if job.user_id != active_user_id():
-            abort(404)
-        before_text = request.form.get("before_text", "")
-        after_text = request.form.get("after_text", "")
-        caption_html = request.form.get("caption_html")
-        selected_chat_id = request.form.get("chat_id", "")
+        if job.user_id != active_user_id(request):
+            raise _not_found()
+        return youtube_job_payload(request, job)
+
+    @app.post("/youtube/send/{job_id}", name="youtube_send")
+    def youtube_send(request: Request, job_id: str) -> Response:
+        job = youtube_jobs.get(job_id)
+        if job.user_id != active_user_id(request):
+            raise _not_found()
+        before_text = request_value(request, "before_text")
+        after_text = request_value(request, "after_text")
+        caption_html = request_optional_value(request, "caption_html")
+        selected_chat_id = request_value(request, "chat_id")
         try:
-            selected_chat_id = validate_chat_id(selected_chat_id, job.user_id)
+            selected_chat_id = validate_chat_id(
+                request,
+                selected_chat_id,
+                job.user_id,
+            )
             service.publish_youtube(
                 *with_user_arg(
                     (
@@ -1019,73 +1643,101 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
                 )
             )
             youtube_jobs.remove(job_id)
-            return redirect(url_for("done", source="youtube"))
+            destination = with_query(route_path("done"), source="youtube")
+            return (
+                success_response(redirect_to=destination)
+                if wants_json(request)
+                else RedirectResponse(destination, status_code=302)
+            )
         except Exception as error:
             LOGGER.exception("Failed to publish YouTube job %s", job_id)
-            return render_template(
-                "youtube_edit.html",
-                job=job,
-                telegram_channels=telegram_channels(job.user_id),
-                selected_chat_id=selected_chat_id,
-                before_text=before_text,
-                after_text=after_text,
-                caption_html=caption_html,
-                error=str(error),
-            ), 502
+            return (
+                json_error(error, 502)
+                if wants_json(request)
+                else PlainTextResponse(str(error), status_code=502)
+            )
 
-    @app.get("/preview/<job_id>")
-    def preview(job_id: str):
-        return preview_item(job_id, 0)
+    @app.get("/preview/{job_id}", name="preview")
+    def preview(request: Request, job_id: str) -> Response:
+        return preview_item(request, job_id, 0)
 
-    @app.get("/preview/<job_id>/<int:item_index>")
-    def preview_item(job_id: str, item_index: int):
+    @app.get(
+        "/preview/{job_id}/{item_index}",
+        name="preview_item",
+    )
+    def preview_item(
+        request: Request,
+        job_id: str,
+        item_index: int,
+    ) -> Response:
         job = jobs.get(job_id)
-        if job.user_id != active_user_id():
-            abort(404)
+        if job.user_id != active_user_id(request):
+            raise _not_found()
         if item_index < 0 or item_index >= len(job.paths):
-            abort(404)
+            raise _not_found()
         path = job.paths[item_index]
-        mimetype = mimetypes.guess_type(path.name)[0]
-        if not mimetype:
-            mimetype = "image/jpeg" if job.video.media_type == "image" else "video/mp4"
-        return send_file(path, mimetype=mimetype, conditional=True)
+        media_type = mimetypes.guess_type(path.name)[0]
+        if not media_type:
+            media_type = (
+                "image/jpeg"
+                if job.video.media_type == "image"
+                else "video/mp4"
+            )
+        return FileResponse(path, media_type=media_type)
 
-    @app.post("/send/<job_id>")
-    def send(job_id: str):
+    @app.post("/send/{job_id}", name="send")
+    def send(request: Request, job_id: str) -> Response:
         job = jobs.get(job_id)
-        if job.user_id != active_user_id():
-            abort(404)
-        before_text = request.form.get("before_text", "")
-        quote_text = request.form.get("quote_text", "")
-        after_text = request.form.get("after_text", "")
-        caption_html = request.form.get("caption_html")
-        options_present = request.form.get("caption_options_present") == "1"
+        if job.user_id != active_user_id(request):
+            raise _not_found()
+        before_text = request_value(request, "before_text")
+        quote_text = request_value(request, "quote_text")
+        after_text = request_value(request, "after_text")
+        caption_html = request_optional_value(request, "caption_html")
+        options_present = (
+            request_value(request, "caption_options_present") == "1"
+        )
         include_author = (
-            request.form.get("include_author") == "on" if options_present else True
+            request_bool(request, "include_author")
+            if options_present
+            else True
         )
         include_description = (
-            request.form.get("include_description") == "on" if options_present else True
+            request_bool(request, "include_description")
+            if options_present
+            else True
         )
         selected_chat_id = (
-            request.form.get("chat_id", "").strip() or job.selected_chat_id
+            request_value(request, "chat_id").strip()
+            or job.selected_chat_id
         )
         selected_image_indices: tuple[int, ...] | None = None
         publish_paths = job.paths
         try:
-            selected_chat_id = validate_chat_id(selected_chat_id, job.user_id)
+            selected_chat_id = validate_chat_id(
+                request,
+                selected_chat_id,
+                job.user_id,
+            )
             if (
                 job.video.media_type == "image"
-                and request.form.get("image_selection_present") == "1"
+                and request_value(request, "image_selection_present") == "1"
             ):
-                requested_indices = set(request.form.getlist("selected_image_indices"))
+                requested_indices = set(
+                    request_list(request, "selected_image_indices")
+                )
                 selected_image_indices = tuple(
                     index
                     for index in range(len(job.paths))
                     if str(index) in requested_indices
                 )
                 if not selected_image_indices:
-                    raise ValueError("Выберите хотя бы одно изображение для публикации")
-                publish_paths = tuple(job.paths[index] for index in selected_image_indices)
+                    raise ValueError(
+                        "Выберите хотя бы одно изображение для публикации"
+                    )
+                publish_paths = tuple(
+                    job.paths[index] for index in selected_image_indices
+                )
             service.publish(
                 *with_user_arg(
                     (
@@ -1102,36 +1754,47 @@ def create_app(config: Config, service: TikTokToTelegram) -> Flask:
                     job.user_id,
                 )
             )
-            service.storage.mark(*with_user_arg((job.video.video_id, job.video.username), job.user_id))
+            if hasattr(service, "mark_processed"):
+                service.mark_processed(
+                    *with_user_arg((job.video,), job.user_id)
+                )
+            else:
+                service.storage.mark(
+                    *with_user_arg(
+                        (job.video.video_id, job.video.username),
+                        job.user_id,
+                    )
+                )
             jobs.remove(job_id)
-            return redirect(url_for("done"))
+            destination = route_path("done")
+            return (
+                success_response(redirect_to=destination)
+                if wants_json(request)
+                else RedirectResponse(destination, status_code=302)
+            )
         except Exception as error:
             LOGGER.exception("Failed to publish prepared job %s", job_id)
-            return render_template(
-                "edit.html",
-                job=job,
-                before_text=before_text,
-                quote_text=quote_text,
-                after_text=after_text,
-                caption_html=caption_html,
-                include_author=include_author,
-                include_description=include_description,
-                selected_image_indices=selected_image_indices,
-                selected_chat_id=selected_chat_id,
-                telegram_channels=telegram_channels(job.user_id),
-                error=str(error),
-            ), 502
+            return (
+                json_error(error, 502)
+                if wants_json(request)
+                else PlainTextResponse(str(error), status_code=502)
+            )
 
-    @app.post("/cancel/<job_id>")
-    def cancel(job_id: str):
+    @app.post("/cancel/{job_id}", name="cancel")
+    def cancel(request: Request, job_id: str) -> Response:
         job = jobs.get(job_id)
-        if job.user_id != active_user_id():
-            abort(404)
+        if job.user_id != active_user_id(request):
+            raise _not_found()
         jobs.remove(job_id)
-        return redirect(url_for("index"))
+        destination = route_path("index")
+        return (
+            success_response(redirect_to=destination)
+            if wants_json(request)
+            else RedirectResponse(destination, status_code=302)
+        )
 
-    @app.get("/done")
-    def done() -> str:
-        return render_template("done.html", source=request.args.get("source", "tiktok"))
+    @app.get("/done", name="done")
+    def done() -> Response:
+        return render_spa()
 
     return app

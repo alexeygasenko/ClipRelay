@@ -1,0 +1,88 @@
+export const SOURCES = [
+  {
+    id: "tiktok",
+    name: "TikTok",
+    short: "TT",
+    icon: "/static/source-icons/tiktok.png",
+    accent: "cyan-pink",
+    description: "Видео, фотоподборки и импорт канала",
+    label: "Ссылка на TikTok-пост",
+    placeholder: "Вставьте ссылку на видео или фотоподборку",
+    endpoint: "/media/info",
+    parameter: "media_url",
+    needsChannel: true,
+    modes: true,
+  },
+  {
+    id: "instagram",
+    name: "Instagram",
+    short: "IG",
+    icon: "/static/source-icons/instagram.png",
+    accent: "sunset",
+    description: "Reels, видео и публикации с изображениями",
+    label: "Ссылка на Instagram-пост",
+    placeholder: "Вставьте ссылку на Reel или публикацию",
+    endpoint: "/media/info",
+    parameter: "media_url",
+    needsChannel: true,
+  },
+  {
+    id: "twitter",
+    name: "X",
+    short: "X",
+    icon: "/static/source-icons/x.png",
+    accent: "silver",
+    description: "Видео, изображения и текст публикации",
+    label: "Ссылка на пост в X",
+    placeholder: "https://x.com/username/status/…",
+    endpoint: "/media/info",
+    parameter: "media_url",
+    needsChannel: true,
+  },
+  {
+    id: "reddit",
+    name: "Reddit",
+    short: "r/",
+    icon: "/static/source-icons/reddit.png",
+    accent: "orange",
+    description: "Видео, галереи, изображения и текстовые посты",
+    label: "Ссылка на публикацию Reddit",
+    placeholder: "https://www.reddit.com/r/…",
+    endpoint: "/media/info",
+    parameter: "media_url",
+    needsChannel: true,
+  },
+  {
+    id: "youtube",
+    name: "YouTube",
+    short: "YT",
+    icon: "/static/source-icons/youtube.png",
+    accent: "red",
+    description: "Видео, превью и Telegram-посты",
+    label: "Ссылка на YouTube-видео",
+    placeholder: "Вставьте ссылку на видео",
+    endpoint: "/youtube/info",
+    parameter: "youtube_url",
+  },
+  {
+    id: "spotify",
+    name: "Spotify",
+    short: "SP",
+    icon: "/static/source-icons/spotify.png",
+    accent: "green",
+    description: "MP3 320 кбит/с и Telegram-посты",
+    label: "Ссылка на трек Spotify",
+    placeholder: "https://open.spotify.com/track/…",
+    endpoint: "/spotify/info",
+    parameter: "spotify_url",
+    needsChannel: true,
+  },
+];
+
+export function enabledSources(permissions = {}) {
+  return SOURCES.filter((source) => permissions[source.id] !== false);
+}
+
+export function sourceById(id) {
+  return SOURCES.find((source) => source.id === id) || SOURCES[0];
+}

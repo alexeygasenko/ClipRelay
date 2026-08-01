@@ -9,3 +9,5 @@ data/
 *cookie*.txt
 *cookie*.json
 *cookies*/
+frontend/node_modules/
+frontend/.vite/

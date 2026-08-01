@@ -85,6 +85,8 @@ class Config:
     web_password: str | None
     telegram_channels: tuple[TelegramChannel, ...] = ()
     spotify_cookies_file: Path | None = None
+    twitter_cookies_file: Path | None = None
+    reddit_cookies_file: Path | None = None
 
     def validate_telegram_chat_id(self, chat_id: str | None) -> str:
         selected = (chat_id or self.telegram_chat_id).strip()
@@ -127,6 +129,12 @@ class Config:
         spotify_cookies = str(
             _value(data, "SPOTIFY_COOKIES_FILE", "spotify.cookies_file", "")
         ).strip()
+        twitter_cookies = str(
+            _value(data, "TWITTER_COOKIES_FILE", "twitter.cookies_file", "")
+        ).strip()
+        reddit_cookies = str(
+            _value(data, "REDDIT_COOKIES_FILE", "reddit.cookies_file", "")
+        ).strip()
         youtube_po_token_provider_url = str(
             _value(
                 data,
@@ -167,4 +175,6 @@ class Config:
                 _value(data, "TELEGRAM_CHANNELS", "telegram.channels", []), chat_id
             ),
             spotify_cookies_file=_config_path(spotify_cookies, config_file),
+            twitter_cookies_file=_config_path(twitter_cookies, config_file),
+            reddit_cookies_file=_config_path(reddit_cookies, config_file),
         )

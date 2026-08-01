@@ -1,3 +1,5 @@
+import sqlite3
+
 from app.storage import Storage
 
 
@@ -71,3 +73,72 @@ def test_admin_user_is_created_and_settings_are_user_scoped(tmp_path) -> None:
     assert [item.chat_id for item in storage.telegram_destinations(user.id)] == ["@alice"]
     assert storage.monitored_tiktok_channels(admin.id) == ("admin_channel",)
     assert storage.monitored_tiktok_channels(user.id) == ("alice_channel",)
+
+
+def test_user_permissions_include_twitter_and_reddit(tmp_path) -> None:
+    storage = Storage(tmp_path / "state.sqlite3")
+    user = storage.create_user("alice", "hash")
+
+    assert user.allow_twitter
+    assert user.allow_reddit
+    assert user.allows("twitter")
+    assert user.allows("reddit")
+
+    storage.update_user(
+        user.id,
+        username=user.username,
+        is_admin=False,
+        is_disabled=False,
+        allow_tiktok=True,
+        allow_instagram=True,
+        allow_youtube=True,
+        allow_spotify=True,
+        allow_twitter=False,
+        allow_reddit=False,
+    )
+
+    updated = storage.get_user(user.id)
+    assert updated is not None
+    assert not updated.allow_twitter
+    assert not updated.allow_reddit
+
+
+def test_user_schema_migration_adds_social_permissions_with_safe_defaults(
+    tmp_path,
+) -> None:
+    database = tmp_path / "state.sqlite3"
+    connection = sqlite3.connect(database)
+    connection.execute(
+        """
+        CREATE TABLE users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            password_hash TEXT,
+            is_admin INTEGER NOT NULL DEFAULT 0,
+            is_disabled INTEGER NOT NULL DEFAULT 0,
+            allow_tiktok INTEGER NOT NULL DEFAULT 1,
+            allow_instagram INTEGER NOT NULL DEFAULT 1,
+            allow_youtube INTEGER NOT NULL DEFAULT 1,
+            allow_spotify INTEGER NOT NULL DEFAULT 1,
+            must_set_password INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO users(
+            id, username, password_hash, is_admin, must_set_password
+        ) VALUES (1, 'existing-admin', 'hash', 1, 0)
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    storage = Storage(database)
+
+    user = storage.get_user(1)
+    assert user is not None
+    assert user.username == "existing-admin"
+    assert user.allow_twitter
+    assert user.allow_reddit

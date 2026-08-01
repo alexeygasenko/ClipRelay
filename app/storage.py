@@ -28,19 +28,21 @@ class User:
     allow_instagram: bool = True
     allow_youtube: bool = True
     allow_spotify: bool = True
+    allow_twitter: bool = True
+    allow_reddit: bool = True
     must_set_password: bool = False
     created_at: str = ""
 
     def allows(self, service_name: str) -> bool:
-        if service_name == "tiktok":
-            return self.allow_tiktok
-        if service_name == "instagram":
-            return self.allow_instagram
-        if service_name == "youtube":
-            return self.allow_youtube
-        if service_name == "spotify":
-            return self.allow_spotify
-        return False
+        permissions = {
+            "tiktok": self.allow_tiktok,
+            "instagram": self.allow_instagram,
+            "youtube": self.allow_youtube,
+            "spotify": self.allow_spotify,
+            "twitter": self.allow_twitter,
+            "reddit": self.allow_reddit,
+        }
+        return permissions.get(service_name, False)
 
 
 class Storage:
@@ -77,23 +79,32 @@ class Storage:
                 allow_instagram INTEGER NOT NULL DEFAULT 1,
                 allow_youtube INTEGER NOT NULL DEFAULT 1,
                 allow_spotify INTEGER NOT NULL DEFAULT 1,
+                allow_twitter INTEGER NOT NULL DEFAULT 1,
+                allow_reddit INTEGER NOT NULL DEFAULT 1,
                 must_set_password INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
-        if "allow_spotify" not in self._table_columns("users"):
-            self.connection.execute(
-                "ALTER TABLE users ADD COLUMN allow_spotify INTEGER NOT NULL DEFAULT 1"
-            )
+        user_columns = self._table_columns("users")
+        for permission_column in (
+            "allow_spotify",
+            "allow_twitter",
+            "allow_reddit",
+        ):
+            if permission_column not in user_columns:
+                self.connection.execute(
+                    f"ALTER TABLE users ADD COLUMN {permission_column} "
+                    "INTEGER NOT NULL DEFAULT 1"
+                )
         self.connection.execute(
             """
             INSERT OR IGNORE INTO users(
                 id, username, password_hash, is_admin, is_disabled,
                 allow_tiktok, allow_instagram, allow_youtube, allow_spotify,
-                must_set_password
+                allow_twitter, allow_reddit, must_set_password
             )
-            VALUES (1, 'boyd', NULL, 1, 0, 1, 1, 1, 1, 1)
+            VALUES (1, 'boyd', NULL, 1, 0, 1, 1, 1, 1, 1, 1, 1)
             """
         )
         self._ensure_processed_videos()
@@ -294,7 +305,9 @@ class Storage:
             bool(row[7]),
             bool(row[8]),
             bool(row[9]),
-            str(row[10]),
+            bool(row[10]),
+            bool(row[11]),
+            str(row[12]),
         )
 
     def get_user(self, user_id: int) -> User | None:
@@ -303,7 +316,7 @@ class Storage:
                 """
                 SELECT id, username, password_hash, is_admin, is_disabled,
                        allow_tiktok, allow_instagram, allow_youtube, allow_spotify,
-                       must_set_password, created_at
+                       allow_twitter, allow_reddit, must_set_password, created_at
                 FROM users WHERE id = ?
                 """,
                 (user_id,),
@@ -316,7 +329,7 @@ class Storage:
                 """
                 SELECT id, username, password_hash, is_admin, is_disabled,
                        allow_tiktok, allow_instagram, allow_youtube, allow_spotify,
-                       must_set_password, created_at
+                       allow_twitter, allow_reddit, must_set_password, created_at
                 FROM users WHERE username = ? COLLATE NOCASE
                 """,
                 (username.strip(),),
@@ -360,16 +373,25 @@ class Storage:
         allow_instagram: bool,
         allow_youtube: bool,
         allow_spotify: bool,
+        allow_twitter: bool | None = None,
+        allow_reddit: bool | None = None,
     ) -> None:
         if user_id == 1:
             is_admin = True
+        current = self.get_user(user_id)
+        if not current:
+            raise ValueError("Пользователь не найден")
+        if allow_twitter is None:
+            allow_twitter = current.allow_twitter
+        if allow_reddit is None:
+            allow_reddit = current.allow_reddit
         with self.lock:
             self.connection.execute(
                 """
                 UPDATE users
                 SET username = ?, is_admin = ?, is_disabled = ?,
                     allow_tiktok = ?, allow_instagram = ?, allow_youtube = ?,
-                    allow_spotify = ?
+                    allow_spotify = ?, allow_twitter = ?, allow_reddit = ?
                 WHERE id = ?
                 """,
                 (
@@ -380,6 +402,8 @@ class Storage:
                     int(allow_instagram),
                     int(allow_youtube),
                     int(allow_spotify),
+                    int(allow_twitter),
+                    int(allow_reddit),
                     user_id,
                 ),
             )
@@ -395,7 +419,7 @@ class Storage:
                 """
                 SELECT id, username, password_hash, is_admin, is_disabled,
                        allow_tiktok, allow_instagram, allow_youtube, allow_spotify,
-                       must_set_password, created_at
+                       allow_twitter, allow_reddit, must_set_password, created_at
                 FROM users
                 ORDER BY id
                 LIMIT ? OFFSET ?
@@ -410,7 +434,7 @@ class Storage:
                 """
                 SELECT id, username, password_hash, is_admin, is_disabled,
                        allow_tiktok, allow_instagram, allow_youtube, allow_spotify,
-                       must_set_password, created_at
+                       allow_twitter, allow_reddit, must_set_password, created_at
                 FROM users
                 WHERE is_disabled = 0
                 ORDER BY id
