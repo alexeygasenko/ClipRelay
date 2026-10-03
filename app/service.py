@@ -19,7 +19,7 @@ from html.parser import HTMLParser
 from io import BytesIO
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import requests
 import yt_dlp
@@ -84,6 +84,7 @@ TELEGRAM_DOWNLOAD_COMMAND_RE = re.compile(
     r"(?:@[A-Za-z0-9_]+)?(?:\s|$)",
     flags=re.IGNORECASE,
 )
+TELEGRAM_URL_IN_TEXT_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 TELEGRAM_ALLOWED_TAGS = {
     "a",
     "b",
@@ -270,14 +271,40 @@ def instagram_url_from_text(text: str) -> str:
 
 
 def validate_youtube_url(url: str) -> str:
-    url = url.strip()
-    parsed = urlparse(url)
-    host = (parsed.hostname or "").lower()
-    if parsed.scheme not in {"http", "https"} or not (
-        host in {"youtube.com", "youtu.be"} or host.endswith(".youtube.com")
+    value = (url or "").strip()
+    parsed = urlparse(value)
+    host = (parsed.hostname or "").lower().rstrip(".")
+    is_youtube_host = host in {"youtube.com", "youtu.be"} or host.endswith(
+        ".youtube.com"
+    )
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not is_youtube_host
+        or parsed.username
+        or parsed.password
     ):
-        raise ValueError("Нужна полная ссылка на видео YouTube")
-    return url
+        raise ValueError("Нужна полная ссылка на отдельное видео YouTube")
+
+    parts = [part for part in parsed.path.split("/") if part]
+    video_id = ""
+    if host == "youtu.be":
+        video_id = parts[0] if parts else ""
+    elif parts and parts[0].lower() == "watch":
+        video_id = (parse_qs(parsed.query).get("v") or [""])[0].strip()
+    elif len(parts) >= 2 and parts[0].lower() in {
+        "embed",
+        "live",
+        "shorts",
+        "v",
+    }:
+        video_id = parts[1]
+
+    if not video_id or not re.fullmatch(r"[A-Za-z0-9_-]{2,150}", video_id):
+        raise ValueError(
+            "Нужна ссылка на отдельное видео YouTube. "
+            "Для канала или плейлиста выберите режим «Канал / плейлист»."
+        )
+    return value
 
 
 def validate_spotify_track_url(url: str) -> str:
@@ -830,6 +857,7 @@ class TikTokToTelegram:
             self.config.reddit_cookies_file, "reddit-cookies.txt", user_id=1
         )
         self.spotify_lock = threading.Lock()
+        self.telegram_sent_messages_lock = threading.Lock()
         self.telegram_commands_initialized: set[tuple[str, tuple[str, ...]]] = set()
         self.telegram_poll_errors: set[str] = set()
 
@@ -1145,7 +1173,9 @@ class TikTokToTelegram:
         owners: dict[str, int] = {}
         for user in self.storage.active_users():
             if not (
-                user.allow_spotify
+                user.allow_tiktok
+                or user.allow_youtube
+                or user.allow_spotify
                 or user.allow_instagram
                 or user.allow_twitter
                 or user.allow_reddit
@@ -1244,6 +1274,121 @@ class TikTokToTelegram:
     def _telegram_message_text(message: dict[str, Any]) -> str:
         return str(message.get("text") or message.get("caption") or "")
 
+    @staticmethod
+    def _telegram_message_urls(message: dict[str, Any]) -> tuple[str, ...]:
+        urls: list[str] = []
+        for text_key, entities_key in (
+            ("text", "entities"),
+            ("caption", "caption_entities"),
+        ):
+            text = str(message.get(text_key) or "")
+            # Telegram entity offsets count UTF-16 units, including both units
+            # of an emoji. Use the same coordinate system for visible URLs.
+            encoded = text.encode("utf-16-le")
+            candidates: list[tuple[int, str]] = []
+            link_spans: list[tuple[int, int]] = []
+            for entity in message.get(entities_key) or []:
+                if entity.get("type") not in {"url", "text_link"}:
+                    continue
+                offset = int(entity.get("offset") or 0)
+                length = int(entity.get("length") or 0)
+                if offset < 0 or length <= 0 or (offset + length) * 2 > len(encoded):
+                    continue
+                if entity["type"] == "text_link":
+                    url = str(entity.get("url") or "")
+                else:
+                    url = encoded[offset * 2 : (offset + length) * 2].decode(
+                        "utf-16-le", errors="ignore"
+                    )
+                    if not re.match(r"https?://", url, re.IGNORECASE):
+                        url = f"https://{url}"
+                candidates.append((offset, url))
+                link_spans.append((offset, offset + length))
+            for match in TELEGRAM_URL_IN_TEXT_RE.finditer(text):
+                offset = len(text[:match.start()].encode("utf-16-le")) // 2
+                # A clickable link's label may itself look like another URL.
+                # Its Telegram entity supplies the actual destination.
+                if any(start <= offset < end for start, end in link_spans):
+                    continue
+                candidates.append((offset, match.group().rstrip(".,;:!?)]}»”’")))
+            for _, url in sorted(candidates, key=lambda item: item[0]):
+                if url and url not in urls:
+                    urls.append(url)
+        return tuple(urls)
+
+    @classmethod
+    def _telegram_message_links(
+        cls, message: dict[str, Any]
+    ) -> tuple[tuple[str, str], ...]:
+        links: list[tuple[str, str]] = []
+        for url in cls._telegram_message_urls(message):
+            try:
+                host = (urlparse(url).hostname or "").lower().rstrip(".")
+                if host == "spotify.com" or host.endswith(".spotify.com"):
+                    platform = "spotify"
+                    validated = validate_spotify_track_url(url)
+                elif host in {"youtube.com", "youtu.be"} or host.endswith(".youtube.com"):
+                    platform = "youtube"
+                    validated = validate_youtube_url(url)
+                else:
+                    platform = detect_media_platform(url)
+                    validated = MEDIA_SOURCE_REGISTRY[platform].validator(url)
+                    path = urlparse(validated).path
+                    if platform == "instagram" and not re.fullmatch(
+                        r"/(?:[^/]+/)?(?:p|reels?|tv)/[^/]+/?", path
+                    ):
+                        continue
+                    if platform == "tiktok" and not (
+                        re.fullmatch(r"/@[^/]+/(?:video|photo)/\d+/?", path)
+                        or (host in {"vm.tiktok.com", "vt.tiktok.com"} and path.strip("/"))
+                        or re.fullmatch(r"/t/[^/]+/?", path)
+                    ):
+                        continue
+            except ValueError:
+                continue
+            link = (platform, validated)
+            if link not in links:
+                links.append(link)
+        return tuple(links)
+
+    @staticmethod
+    def _telegram_sent_messages_key(bot_token: str, chat_id: str) -> str:
+        return f"telegram_sent_messages_{bot_token.partition(':')[0]}_{chat_id}"
+
+    def _telegram_remember_sent_messages(
+        self, payload: dict[str, Any], bot_token: str, chat_id: str
+    ) -> None:
+        result = payload.get("result") or []
+        messages = result if isinstance(result, list) else [result]
+        by_chat: dict[str, list[int]] = {}
+        for message in messages:
+            if not isinstance(message, dict) or not message.get("message_id"):
+                continue
+            destination = str((message.get("chat") or {}).get("id") or chat_id)
+            by_chat.setdefault(destination, []).append(int(message["message_id"]))
+        for destination, message_ids in by_chat.items():
+            key = self._telegram_sent_messages_key(bot_token, destination)
+            # Persist a bounded history so channel updates and their automatic
+            # discussion forwards cannot repost our output after a restart.
+            with self.telegram_sent_messages_lock:
+                previous = json.loads(self.storage.setting(key, "[]"))
+                self.storage.set_setting(key, json.dumps((previous + message_ids)[-1000:]))
+
+    def _telegram_message_was_sent(
+        self, message: dict[str, Any], bot_token: str
+    ) -> bool:
+        chat_id = str((message.get("chat") or {}).get("id") or "")
+        message_id = message.get("message_id")
+        if message.get("is_automatic_forward"):
+            origin = message.get("forward_origin") or {}
+            if origin.get("type") == "channel":
+                chat_id = str((origin.get("chat") or {}).get("id") or "")
+                message_id = origin.get("message_id")
+        if not chat_id or not message_id:
+            return False
+        key = self._telegram_sent_messages_key(bot_token, chat_id)
+        return int(message_id) in json.loads(self.storage.setting(key, "[]"))
+
     def _telegram_send_text(
         self,
         bot_token: str,
@@ -1262,6 +1407,7 @@ class TikTokToTelegram:
         payload = response.json()
         if not payload.get("ok"):
             raise RuntimeError(f"Telegram API error: {payload}")
+        self._telegram_remember_sent_messages(payload, bot_token, chat_id)
         message_id = (payload.get("result") or {}).get("message_id")
         return int(message_id) if message_id is not None else None
 
@@ -1327,11 +1473,22 @@ class TikTokToTelegram:
             return
 
         message = update.get("message") or update.get("channel_post") or {}
+        sender = message.get("from") or {}
+        if (
+            sender.get("is_bot") and not message.get("sender_chat")
+        ) or str(sender.get("id") or "") == bot_token.partition(":")[0] or (
+            self._telegram_message_was_sent(message, bot_token)
+        ):
+            return
         text = self._telegram_message_text(message)
         command_match = TELEGRAM_DOWNLOAD_COMMAND_RE.match(text.strip())
-        if not command_match:
+        # Keep slash commands explicit: an unrelated bot command must not
+        # unexpectedly download its arguments.
+        if not command_match and text.lstrip().startswith("/"):
             return
-        command = command_match.group("command").lower()
+        links = () if command_match else self._telegram_message_links(message)
+        if not command_match and not links:
+            return
         chat = dict(message.get("chat") or {})
         if not chat.get("id"):
             return
@@ -1339,20 +1496,50 @@ class TikTokToTelegram:
         message_thread_id = message.get("message_thread_id")
         registered = self._telegram_chat_is_registered(chat, bot_token, user_id)
         if not registered:
-            self._telegram_send_text(
-                bot_token,
-                chat_id,
-                "Сначала добавьте чат в настройках ClipRelay",
-                message_thread_id,
-            )
+            if command_match:
+                self._telegram_send_text(
+                    bot_token,
+                    chat_id,
+                    "Сначала добавьте чат в настройках ClipRelay",
+                    message_thread_id,
+                )
             return
 
+        if not command_match:
+            user = self.storage.get_user(user_id)
+            if not user or user.is_disabled:
+                return
+            for platform, url in links:
+                if not user.allows(platform):
+                    continue
+                try:
+                    if platform == "spotify":
+                        self._process_telegram_spotify_command(
+                            url, bot_token, chat_id, user_id, message_thread_id
+                        )
+                    elif platform == "youtube":
+                        self._process_telegram_youtube_message(
+                            url, bot_token, chat_id, user_id, message_thread_id
+                        )
+                    else:
+                        self._process_telegram_social_command(
+                            platform, url, bot_token, chat_id, user_id, message_thread_id
+                        )
+                except Exception:
+                    LOGGER.exception(
+                        "Failed to process Telegram %s link for user %s", platform, user_id
+                    )
+            return
+
+        command = command_match.group("command").lower()
         reply = message.get("reply_to_message") or {}
         link_source = "\n".join(
             part
             for part in (
                 text,
                 self._telegram_message_text(reply),
+                *self._telegram_message_urls(message),
+                *self._telegram_message_urls(reply),
             )
             if part
         )
@@ -1541,6 +1728,12 @@ class TikTokToTelegram:
         message_thread_id: int | None,
     ) -> None:
         source_options = {
+            "tiktok": (
+                validate_tiktok_url,
+                "TikTok",
+                "Скачиваю TikTok-пост…",
+                "Не удалось скачать TikTok-пост",
+            ),
             "instagram": (
                 instagram_url_from_text,
                 "Instagram",
@@ -1621,6 +1814,31 @@ class TikTokToTelegram:
             chat_id,
             status_message_id,
         )
+
+    def _process_telegram_youtube_message(
+        self,
+        url: str,
+        bot_token: str,
+        chat_id: str,
+        user_id: int,
+        message_thread_id: int | None,
+    ) -> None:
+        status_message_id = self._telegram_send_text(
+            bot_token, chat_id, "Готовлю YouTube-пост…", message_thread_id
+        )
+        try:
+            video = self.get_youtube_info(url, user_id)
+            self._publish_youtube_to_telegram(
+                video, bot_token, chat_id, message_thread_id=message_thread_id
+            )
+        except Exception as error:
+            LOGGER.exception("Failed to process Telegram YouTube link for user %s", user_id)
+            self._telegram_finish_status(
+                bot_token, chat_id, status_message_id, str(error),
+                "Не удалось подготовить YouTube-пост",
+            )
+            return
+        self._telegram_finish_status(bot_token, chat_id, status_message_id)
 
     def _process_telegram_instagram_command(
         self,
@@ -2849,6 +3067,7 @@ class TikTokToTelegram:
             payload = response.json()
             if not payload.get("ok"):
                 raise RuntimeError(f"Telegram API error: {payload}")
+            self._telegram_remember_sent_messages(payload, bot_token, chat_id)
             return
         if not paths:
             raise ValueError("Медиафайлы не найдены")
@@ -2860,6 +3079,7 @@ class TikTokToTelegram:
             payload = response.json()
             if not payload.get("ok"):
                 raise RuntimeError(f"Telegram API error: {payload}")
+            self._telegram_remember_sent_messages(payload, bot_token, chat_id)
 
         def send_single(media_path: Path, item_caption: str) -> None:
             method = "sendPhoto" if media_kind == "photo" else "sendVideo"
@@ -2956,23 +3176,42 @@ class TikTokToTelegram:
     ) -> None:
         self.ensure_service_allowed("youtube", user_id)
         target = self.storage.telegram_destination(chat_id, user_id)
-        url = f"https://api.telegram.org/bot{target.bot_token}/sendPhoto"
+        self._publish_youtube_to_telegram(
+            video, target.bot_token, target.chat_id,
+            before_text=before_text, after_text=after_text, caption_html=caption_html,
+        )
+
+    def _publish_youtube_to_telegram(
+        self,
+        video: YouTubeVideo,
+        bot_token: str,
+        chat_id: str,
+        before_text: str = "",
+        after_text: str = "",
+        caption_html: str | None = None,
+        message_thread_id: int | None = None,
+    ) -> None:
+        data: dict[str, Any] = {
+            "chat_id": chat_id,
+            "photo": video.thumbnail_url,
+            "caption": resolve_caption_html(
+                caption_html, build_youtube_caption(video, before_text, after_text)
+            ),
+            "parse_mode": "HTML",
+        }
+        if message_thread_id:
+            data["message_thread_id"] = message_thread_id
+        url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
         response = requests.post(
             url,
-            data={
-                "chat_id": target.chat_id,
-                "photo": video.thumbnail_url,
-                "caption": resolve_caption_html(
-                    caption_html, build_youtube_caption(video, before_text, after_text)
-                ),
-                "parse_mode": "HTML",
-            },
+            data=data,
             timeout=60,
         )
         response.raise_for_status()
         payload = response.json()
         if not payload.get("ok"):
             raise RuntimeError(f"Telegram API error: {payload}")
+        self._telegram_remember_sent_messages(payload, bot_token, chat_id)
 
     def publish_spotify(
         self,
@@ -3049,6 +3288,7 @@ class TikTokToTelegram:
             photo_payload = photo_response.json()
             if not photo_payload.get("ok"):
                 raise RuntimeError(f"Telegram API error: {photo_payload}")
+            self._telegram_remember_sent_messages(photo_payload, bot_token, chat_id)
 
         audio_url = f"https://api.telegram.org/bot{bot_token}/sendAudio"
         thumbnail_file = BytesIO(cover_content) if cover_content else None
@@ -3080,6 +3320,8 @@ class TikTokToTelegram:
         payload = response.json()
         if not payload.get("ok"):
             raise RuntimeError(f"Telegram API error: {payload}")
+
+        self._telegram_remember_sent_messages(payload, bot_token, chat_id)
 
     def process_channel(self, channel: str, user_id: int = 1) -> None:
         username, _ = normalize_channel(channel)
@@ -3131,7 +3373,7 @@ class TikTokToTelegram:
             time.sleep(sleep_seconds)
 
     def run_telegram_commands_forever(self) -> None:
-        LOGGER.info("Telegram command monitor started")
+        LOGGER.info("Telegram message monitor started")
         while True:
             bot_count = self.poll_telegram_commands_once()
             time.sleep(2 if bot_count else 10)

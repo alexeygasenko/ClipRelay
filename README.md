@@ -10,6 +10,8 @@ FastAPI served by Uvicorn; the web interface is built with Vue 3 and Vite.
 - Downloads Reddit videos, images, galleries, and text posts.
 - Accepts TikTok channels and lets you publish or skip existing videos.
 - Automatically monitors configured TikTok channels.
+- Automatically loads posts from supported links sent to registered Telegram chats,
+  without commands.
 - Downloads YouTube videos and thumbnails in the best available quality.
 - Publishes YouTube links with thumbnails and prepared Telegram captions.
 - Downloads Spotify tracks directly from Spotify, converts them to 320 kbps MP3,
@@ -62,7 +64,21 @@ the thumbnail preview appears automatically, followed by buttons for downloading
 the video, downloading the thumbnail, and preparing the Telegram post. For
 Spotify, paste a link to an individual track to preview its cover and artist,
 download an MP3 with in-button progress, or prepare a Telegram post. The same
-track can be requested directly in a Telegram chat:
+track can be requested directly in a Telegram chat. Send a TikTok, Instagram,
+X / Twitter, Reddit, Spotify track, or YouTube video link as an ordinary message
+and the bot posts it to that same chat and forum topic. It reads links in text,
+media captions, and clickable text links. Multiple links are processed in message
+order, with duplicates removed within that message. YouTube sends a thumbnail
+and caption with the video link; Spotify sends the track as MP3. Ordinary replies
+do not reload links from the replied-to message. Unsupported links, disabled
+services, and bot-generated messages are ignored.
+
+For automatic link detection in a group, make the bot an administrator or
+disable Group Privacy with `/setprivacy` in @BotFather and re-add the bot to
+the group. See [Telegram's privacy mode documentation](https://core.telegram.org/bots/features#privacy-mode).
+
+The existing commands remain available:
+
 
 ```text
 /spotify https://open.spotify.com/track/…
@@ -104,7 +120,7 @@ static-asset requests to FastAPI.
 Run the backend suite with `.venv/Scripts/python -m pytest -q` and rebuild the
 frontend with `npm run build` before deployment.
 
-Telegram commands work only in destinations already saved through ClipRelay's
+Telegram commands and automatic links work only in destinations already saved through ClipRelay's
 settings or channel discovery. A bot membership update or a first command never
 registers a chat automatically.
 
@@ -127,7 +143,7 @@ channels are stored by numeric ID; the destination picker shows that ID so
 chats with identical names remain distinguishable. Channels can be searched and
 removed in settings. Search is also available when choosing a destination for
 publishing. The Telegram command menu is configured
-automatically on startup. Command polling uses `getUpdates`, so the same bot
+automatically on startup. Message polling uses `getUpdates`, so the same bot
 cannot have an active webhook at the same time.
 
 The TikTok, Instagram, X / Twitter, Reddit, and YouTube post builder supports Telegram HTML captions,
