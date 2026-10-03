@@ -300,10 +300,7 @@ def validate_youtube_url(url: str) -> str:
         video_id = parts[1]
 
     if not video_id or not re.fullmatch(r"[A-Za-z0-9_-]{2,150}", video_id):
-        raise ValueError(
-            "Нужна ссылка на отдельное видео YouTube. "
-            "Для канала или плейлиста выберите режим «Канал / плейлист»."
-        )
+        raise ValueError("Нужна ссылка на отдельное видео YouTube.")
     return value
 
 
