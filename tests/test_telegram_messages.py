@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from app.config import Config
-from app.service import SpotifyTrack, TikTokToTelegram, Video, YouTubeVideo
+from app.service import SpotifyTrack, TikTokToTelegram, Video
 
 
 BOT_TOKEN = "123456:command-token"
@@ -140,7 +140,6 @@ def incoming(text: str, **fields) -> dict:
         ("twitter", TWITTER_URL),
         ("reddit", REDDIT_URL),
         ("spotify", SPOTIFY_URL),
-        ("youtube", YOUTUBE_URL),
     ],
 )
 def test_message_link_parser_detects_supported_post_in_text(platform, url) -> None:
@@ -351,7 +350,7 @@ def test_anonymous_chat_admin_is_allowed_despite_bot_shaped_sender(bot) -> None:
 
 
 @pytest.mark.parametrize("platform", ["tiktok", "youtube"])
-def test_polling_includes_users_with_only_tiktok_or_youtube_enabled(bot, platform) -> None:
+def test_polling_includes_tiktok_only_users_and_excludes_youtube_only_users(bot, platform) -> None:
     service, _ = bot
     update_user_permissions(
         service,
@@ -362,7 +361,7 @@ def test_polling_includes_users_with_only_tiktok_or_youtube_enabled(bot, platfor
             )
         },
     )
-    assert service._telegram_bot_owners() == {BOT_TOKEN: 1}
+    assert service._telegram_bot_owners() == ({BOT_TOKEN: 1} if platform == "tiktok" else {})
 
 
 def test_spotify_link_without_command_downloads_and_publishes_track(bot, tmp_path, monkeypatch) -> None:
@@ -394,42 +393,88 @@ def test_spotify_link_without_command_downloads_and_publishes_track(bot, tmp_pat
     assert observed["finished"]
 
 
-def test_youtube_link_without_command_publishes_preview_in_same_topic(bot, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "url",
+    [
+        YOUTUBE_URL,
+        "https://www.youtube.com/watch?v=abc123DEF45",
+        "https://www.youtube.com/shorts/abc123DEF45",
+        "https://www.youtube.com/live/abc123DEF45",
+    ],
+)
+@pytest.mark.parametrize("format", ["text", "caption", "text_link"])
+def test_youtube_links_are_ignored_without_metadata_or_telegram_requests(
+    bot, monkeypatch, url, format
+) -> None:
     service, observed = bot
-    video = YouTubeVideo("abc123DEF45", "Video title", YOUTUBE_URL, "https://i.ytimg.com/preview.jpg", 120, "Creator")
-    metadata = []
-    requests = []
+    monkeypatch.setattr(
+        service,
+        "get_youtube_info",
+        lambda *args, **kwargs: pytest.fail("YouTube metadata must not be fetched"),
+    )
+    update = incoming(url)
+    message = update["message"]
+    if format == "caption":
+        message.pop("text")
+        message["caption"] = url
+    elif format == "text_link":
+        message["text"] = "Смотреть видео"
+        message["entities"] = [
+            {
+                "type": "text_link",
+                "offset": 0,
+                "length": utf16_length(message["text"]),
+                "url": url,
+            }
+        ]
 
-    def info(url, user_id=1):
-        metadata.append((url, user_id))
-        return video
+    assert service._telegram_message_links(message) == ()
+    service.process_telegram_update(update, BOT_TOKEN, 1)
+    assert all(not values for values in observed.values())
 
-    class Response:
-        def raise_for_status(self):
-            pass
 
-        def json(self):
-            return {"ok": True, "result": {"message_id": 99}}
+def test_youtube_link_does_not_prevent_instagram_download_in_mixed_message(bot) -> None:
+    service, observed = bot
+    service.process_telegram_update(
+        incoming(f"{YOUTUBE_URL}\n{INSTAGRAM_URL}"), BOT_TOKEN, 1
+    )
+    assert observed["prepared"] == [(INSTAGRAM_URL, 1)]
+    assert [item["video"].platform for item in observed["published"]] == ["instagram"]
 
-    def post(url, data, timeout):
-        requests.append((url, dict(data)))
-        return Response()
 
-    monkeypatch.setattr(service, "get_youtube_info", info)
-    monkeypatch.setattr("app.service.requests.post", post)
-    service.process_telegram_update(incoming(f"Видео {YOUTUBE_URL}"), BOT_TOKEN, 1)
+def test_human_forward_of_other_bot_post_downloads_hidden_original_link(bot) -> None:
+    service, observed = bot
+    caption = "Скачано через SaveAsBot\nОригинал"
+    update = incoming(
+        "",
+        caption=caption,
+        caption_entities=[
+            {
+                "type": "text_link",
+                "offset": utf16_length("Скачано через SaveAsBot\n"),
+                "length": utf16_length("Оригинал"),
+                "url": INSTAGRAM_URL,
+            }
+        ],
+        forward_origin={
+            "type": "user",
+            "date": 1791248400,
+            "sender_user": {
+                "id": 654321,
+                "is_bot": True,
+                "username": "SaveAsBot",
+            },
+        },
+    )
+    update["message"].pop("text")
 
-    assert metadata == [(YOUTUBE_URL, 1)]
-    assert len(requests) == 1
-    url, data = requests[0]
-    assert url == f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
-    assert data["chat_id"] == str(CHAT_ID)
-    assert data["message_thread_id"] == 17
-    assert data["photo"] == video.thumbnail_url
-    assert "Video title" in data["caption"]
-    assert YOUTUBE_URL in data["caption"]
-    assert observed["status"]
-    assert observed["finished"]
+    assert update["message"]["from"]["is_bot"] is False
+    assert service._telegram_message_links(update["message"]) == (
+        ("instagram", INSTAGRAM_URL),
+    )
+    service.process_telegram_update(update, BOT_TOKEN, 1)
+    assert observed["prepared"] == [(INSTAGRAM_URL, 1)]
+    assert [item["video"].platform for item in observed["published"]] == ["instagram"]
 
 
 def test_failed_first_link_does_not_block_next_post_and_cleans_files(bot, monkeypatch) -> None:

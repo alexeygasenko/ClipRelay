@@ -1171,7 +1171,6 @@ class TikTokToTelegram:
         for user in self.storage.active_users():
             if not (
                 user.allow_tiktok
-                or user.allow_youtube
                 or user.allow_spotify
                 or user.allow_instagram
                 or user.allow_twitter
@@ -1324,9 +1323,6 @@ class TikTokToTelegram:
                 if host == "spotify.com" or host.endswith(".spotify.com"):
                     platform = "spotify"
                     validated = validate_spotify_track_url(url)
-                elif host in {"youtube.com", "youtu.be"} or host.endswith(".youtube.com"):
-                    platform = "youtube"
-                    validated = validate_youtube_url(url)
                 else:
                     platform = detect_media_platform(url)
                     validated = MEDIA_SOURCE_REGISTRY[platform].validator(url)
@@ -1512,10 +1508,6 @@ class TikTokToTelegram:
                 try:
                     if platform == "spotify":
                         self._process_telegram_spotify_command(
-                            url, bot_token, chat_id, user_id, message_thread_id
-                        )
-                    elif platform == "youtube":
-                        self._process_telegram_youtube_message(
                             url, bot_token, chat_id, user_id, message_thread_id
                         )
                     else:
@@ -1811,31 +1803,6 @@ class TikTokToTelegram:
             chat_id,
             status_message_id,
         )
-
-    def _process_telegram_youtube_message(
-        self,
-        url: str,
-        bot_token: str,
-        chat_id: str,
-        user_id: int,
-        message_thread_id: int | None,
-    ) -> None:
-        status_message_id = self._telegram_send_text(
-            bot_token, chat_id, "Готовлю YouTube-пост…", message_thread_id
-        )
-        try:
-            video = self.get_youtube_info(url, user_id)
-            self._publish_youtube_to_telegram(
-                video, bot_token, chat_id, message_thread_id=message_thread_id
-            )
-        except Exception as error:
-            LOGGER.exception("Failed to process Telegram YouTube link for user %s", user_id)
-            self._telegram_finish_status(
-                bot_token, chat_id, status_message_id, str(error),
-                "Не удалось подготовить YouTube-пост",
-            )
-            return
-        self._telegram_finish_status(bot_token, chat_id, status_message_id)
 
     def _process_telegram_instagram_command(
         self,
