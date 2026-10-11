@@ -1466,6 +1466,14 @@ class TikTokToTelegram:
             return
 
         message = update.get("message") or update.get("channel_post") or {}
+        forward_origin = message.get("forward_origin") or {}
+        # A manual forward is sent by the human who forwarded it, so inspect
+        # the original sender before parsing links or commands.
+        if (
+            forward_origin.get("type") == "user"
+            and (forward_origin.get("sender_user") or {}).get("is_bot")
+        ) or (message.get("forward_from") or {}).get("is_bot"):
+            return
         sender = message.get("from") or {}
         if (
             sender.get("is_bot") and not message.get("sender_chat")

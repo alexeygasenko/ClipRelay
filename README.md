@@ -73,8 +73,9 @@ YouTube links are ignored by the bot. Ordinary replies
 do not reload links from the replied-to message. Unsupported links, disabled
 services, and bot-generated messages are ignored.
 
-A message forwarded by a user is processed like any other user message, even
-if its original author was a bot. The source URL comes from its text, caption,
+Messages forwarded from bots, including SaveAsBot, are silently ignored when
+Telegram identifies the original sender as a bot. Messages forwarded from people
+or channels are processed normally. The source URL comes from the text, caption,
 or a Telegram `text_link` entity; the post is then fetched from that source.
 
 For automatic link detection in a group, make the bot an administrator or

@@ -442,37 +442,101 @@ def test_youtube_link_does_not_prevent_instagram_download_in_mixed_message(bot) 
     assert [item["video"].platform for item in observed["published"]] == ["instagram"]
 
 
-def test_human_forward_of_other_bot_post_downloads_hidden_original_link(bot) -> None:
+@pytest.mark.parametrize(
+    "username,origin_format,message_format,update_type",
+    [
+        ("SaveAsBot", "modern", "caption_hidden_link", "message"),
+        ("AnotherDownloaderBot", "modern", "text", "message"),
+        ("SaveAsBot", "modern", "instagram_command", "channel_post"),
+        ("AnotherDownloaderBot", "modern", "spotify_command", "message"),
+        ("SaveAsBot", "legacy", "caption_hidden_link", "channel_post"),
+        ("AnotherDownloaderBot", "legacy", "text", "message"),
+    ],
+)
+def test_forwarded_bot_posts_and_commands_are_silently_ignored(
+    bot, monkeypatch, username, origin_format, message_format, update_type
+) -> None:
     service, observed = bot
-    caption = "Скачано через SaveAsBot\nОригинал"
-    update = incoming(
-        "",
-        caption=caption,
-        caption_entities=[
+    update = incoming(INSTAGRAM_URL)
+    message = update.pop("message")
+    original_sender = {"id": 654321, "is_bot": True, "username": username}
+    if origin_format == "modern":
+        message["forward_origin"] = {
+            "type": "user",
+            "date": 1791248400,
+            "sender_user": original_sender,
+        }
+    else:
+        message["forward_from"] = original_sender
+    if message_format == "caption_hidden_link":
+        message.pop("text")
+        prefix = f"Скачано через {username}\n"
+        message["caption"] = f"{prefix}Оригинал"
+        message["caption_entities"] = [
             {
                 "type": "text_link",
-                "offset": utf16_length("Скачано через SaveAsBot\n"),
+                "offset": utf16_length(prefix),
                 "length": utf16_length("Оригинал"),
                 "url": INSTAGRAM_URL,
             }
-        ],
-        forward_origin={
-            "type": "user",
-            "date": 1791248400,
-            "sender_user": {
-                "id": 654321,
-                "is_bot": True,
-                "username": "SaveAsBot",
-            },
-        },
-    )
-    update["message"].pop("text")
+        ]
+    elif message_format == "instagram_command":
+        message["text"] = f"/instagram {INSTAGRAM_URL}"
+    elif message_format == "spotify_command":
+        message["text"] = f"/spotify {SPOTIFY_URL}"
+    if update_type == "channel_post":
+        message["chat"]["type"] = "channel"
 
-    assert update["message"]["from"]["is_bot"] is False
-    assert service._telegram_message_links(update["message"]) == (
-        ("instagram", INSTAGRAM_URL),
+    def forbidden(*args, **kwargs):
+        pytest.fail("forward from a bot must be ignored before parsing or dispatch")
+
+    for method in (
+        "_telegram_message_links",
+        "_process_telegram_instagram_command",
+        "_process_telegram_social_command",
+        "_process_telegram_spotify_command",
+        "_process_telegram_spotify_search_command",
+    ):
+        monkeypatch.setattr(service, method, forbidden)
+    monkeypatch.setattr("app.service.requests.get", forbidden)
+
+    assert message["from"]["is_bot"] is False
+    service.process_telegram_update({update_type: message}, BOT_TOKEN, 1)
+    assert all(not values for values in observed.values())
+
+
+@pytest.mark.parametrize("origin_type", ["user", "channel"])
+def test_forwarded_human_or_channel_post_still_downloads_original_link(
+    bot, origin_type
+) -> None:
+    service, observed = bot
+    origin = (
+        {"type": "user", "sender_user": {"id": 43, "is_bot": False}}
+        if origin_type == "user"
+        else {"type": "channel", "chat": {"id": -100456}, "message_id": 23}
     )
+    update = incoming(INSTAGRAM_URL, forward_origin=origin)
     service.process_telegram_update(update, BOT_TOKEN, 1)
+    assert observed["prepared"] == [(INSTAGRAM_URL, 1)]
+    assert [item["video"].platform for item in observed["published"]] == ["instagram"]
+
+
+def test_human_command_can_download_link_from_reply_to_bot_forward(bot) -> None:
+    service, observed = bot
+    service.process_telegram_update(
+        incoming(
+            "/instagram",
+            reply_to_message={
+                "text": INSTAGRAM_URL,
+                "forward_origin": {
+                    "type": "user",
+                    "sender_user": {"id": 654321, "is_bot": True, "username": "SaveAsBot"},
+                },
+            },
+        ),
+        BOT_TOKEN,
+        1,
+    )
     assert observed["prepared"] == [(INSTAGRAM_URL, 1)]
     assert [item["video"].platform for item in observed["published"]] == ["instagram"]
 
